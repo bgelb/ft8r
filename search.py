@@ -28,7 +28,8 @@ def dft_mag(
     angle = -2j * math.pi * freq_in_hz / sample_rate
     segment = samples[start_dt_in_samples : start_dt_in_samples + length_in_samples]
     exps = np.exp(angle * n)
-    return abs(np.dot(segment, exps))
+    # Normalize the DFT magnitude so a unit amplitude tone produces 1.0
+    return abs(np.dot(segment, exps)) / float(length_in_samples)
 
 
 def find_candidates(

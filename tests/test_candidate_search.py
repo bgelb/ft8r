@@ -16,13 +16,13 @@ def test_candidate_search(tmp_path):
         audio,
         freq_range,
         dt_range,
-        threshold=4.0,
+        threshold=0.002,
     )
     assert candidates, "no candidates found"
     score, dt, freq = candidates[0]
     assert abs(freq - 1500) < 1.0
     assert abs(dt - 0.0) < 0.2
-    assert score > 4.0
+    assert score > 0.002
     for _, _, f in candidates:
         assert abs(f - 1500) <= 32
 
@@ -37,5 +37,5 @@ def test_candidate_search_noise():
     num_samples = dt_range[-1] + sym_len * 7
     noise = [random.uniform(-1e-2, 1e-2) for _ in range(num_samples)]
     noise_audio = RealSamples(noise, sample_rate_in_hz)
-    cands = find_candidates(noise_audio, freq_range, dt_range, threshold=4.0)
+    cands = find_candidates(noise_audio, freq_range, dt_range, threshold=0.002)
     assert not cands
