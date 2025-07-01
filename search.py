@@ -1,6 +1,6 @@
 # Basic candidate search for FT8 Costas sequence
 import math
-import cmath
+import numpy as np
 from typing import List, Tuple
 
 from utils import (
@@ -12,21 +12,23 @@ from utils import (
 
 
 def dft_mag(
-    audio: RealSamples,
+    samples: np.ndarray,
+    sample_rate: int,
     start_dt_in_samples: int,
     freq_in_hz: float,
     length_in_samples: int,
 ) -> float:
-    """Return DFT magnitude for ``length_in_samples`` samples starting at ``start_dt_in_samples``.
+    """Return DFT magnitude for ``length_in_samples`` samples starting at
+    ``start_dt_in_samples``.
 
-    This simplified routine performs a direct DFT without any windowing or
-    oversampling which is employed in WSJT-X for better sensitivity.
+    The computation uses a vectorized dot product which is considerably
+    faster than iterating over each sample in Python.
     """
-    angle = -2j * math.pi * freq_in_hz / audio.sample_rate_in_hz
-    s = 0j
-    for i in range(length_in_samples):
-        s += audio.samples[start_dt_in_samples + i] * cmath.exp(angle * i)
-    return abs(s)
+    n = np.arange(length_in_samples)
+    angle = -2j * math.pi * freq_in_hz / sample_rate
+    segment = samples[start_dt_in_samples : start_dt_in_samples + length_in_samples]
+    exps = np.exp(angle * n)
+    return abs(np.dot(segment, exps))
 
 
 def find_candidates(
@@ -70,7 +72,7 @@ def find_candidates(
             score = 0.0
             for idx, tone in enumerate(COSTAS_SEQUENCE):
                 f = freq + tone * TONE_SPACING_IN_HZ
-                score += dft_mag(samples_in, start + idx * sym_len, f, sym_len)
+                score += dft_mag(samples, sample_rate, start + idx * sym_len, f, sym_len)
             if score >= threshold:
                 dt = start / sample_rate - COSTAS_START_OFFSET_SEC
                 results.append((score, dt, freq))
