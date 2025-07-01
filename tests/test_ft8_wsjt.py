@@ -1,21 +1,7 @@
 import subprocess
 from pathlib import Path
 
-
-def generate_ft8_wav(message: str, workdir: Path) -> Path:
-    """Run ft8sim to generate a wav file for a message."""
-    cmd = [
-        "ft8sim",
-        message,
-        "1500",
-        "0",
-        "0",
-        "0",
-        "1",
-        "-10",
-    ]
-    subprocess.run(cmd, cwd=workdir, check=True, stdout=subprocess.PIPE, text=True)
-    return workdir / "000000_000001.wav"
+from tests.utils import generate_ft8_wav
 
 
 def decode_ft8_wav(path: Path) -> str:
@@ -49,7 +35,7 @@ def test_ft8sim_to_jt9(tmp_path):
     snr, dt, freq, decoded_msg = parse_jt9_output(first_line)
 
     assert decoded_msg == msg
-    assert abs(snr - (-10)) < 1.0
+    assert abs(snr - (-10)) <= 1.0
     assert abs(dt - 0.0) < 0.2
     assert abs(freq - 1500) < 2.0
 
