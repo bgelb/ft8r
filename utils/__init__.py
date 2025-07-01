@@ -17,6 +17,13 @@ TONE_SPACING_IN_HZ = 6.25
 # start times so they line up with timestamps reported by WSJT‑X.
 COSTAS_START_OFFSET_SEC = 0.5
 
+# Duration of a single FT8 symbol in seconds.  Each symbol lasts for the
+# reciprocal of the tone spacing.
+FT8_SYMBOL_LENGTH_IN_SEC = 1.0 / TONE_SPACING_IN_HZ
+
+# Number of symbols that make up a full FT8 message.
+FT8_SYMBOLS_PER_MESSAGE = 79
+
 
 @dataclass
 class RealSamples:
@@ -55,4 +62,6 @@ __all__ = [
     "COSTAS_SEQUENCE",
     "TONE_SPACING_IN_HZ",
     "COSTAS_START_OFFSET_SEC",
+    "FT8_SYMBOL_LENGTH_IN_SEC",
+    "FT8_SYMBOLS_PER_MESSAGE",
 ]

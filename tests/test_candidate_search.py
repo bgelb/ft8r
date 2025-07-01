@@ -1,21 +1,26 @@
 from search import find_candidates
-from utils import read_wav, RealSamples, TONE_SPACING_IN_HZ
+from utils import (
+    read_wav,
+    RealSamples,
+    TONE_SPACING_IN_HZ,
+    COSTAS_START_OFFSET_SEC,
+    FT8_SYMBOL_LENGTH_IN_SEC,
+    FT8_SYMBOLS_PER_MESSAGE,
+)
 import random
 
-from tests.utils import generate_ft8_wav
+from tests.utils import generate_ft8_wav, default_search_params
 
 
 def test_candidate_search(tmp_path):
     msg = "K1ABC W9XYZ EN37"
     wav = generate_ft8_wav(msg, tmp_path)
     audio = read_wav(str(wav))
-    freq_range = [1000 + i * TONE_SPACING_IN_HZ for i in range(int((2000 - 1000) / TONE_SPACING_IN_HZ) + 1)]
-    dt_step = int(audio.sample_rate_in_hz / TONE_SPACING_IN_HZ)
-    dt_range = list(range(0, int(audio.sample_rate_in_hz * 2), dt_step))
+    max_freq_bin, max_dt_symbols = default_search_params(audio.sample_rate_in_hz)
     candidates = find_candidates(
         audio,
-        freq_range,
-        dt_range,
+        max_freq_bin,
+        max_dt_symbols,
         threshold=0.002,
     )
     assert candidates, "no candidates found"
@@ -29,13 +34,11 @@ def test_candidate_search(tmp_path):
 
 def test_candidate_search_noise():
     sample_rate_in_hz = 12000
-    freq_range = [1000 + i * TONE_SPACING_IN_HZ for i in range(int((2000 - 1000) / TONE_SPACING_IN_HZ) + 1)]
-    dt_step = int(sample_rate_in_hz / TONE_SPACING_IN_HZ)
-    dt_range = list(range(0, int(sample_rate_in_hz * 2), dt_step))
+    max_freq_bin, max_dt_symbols = default_search_params(sample_rate_in_hz)
     random.seed(123)
-    sym_len = dt_step
-    num_samples = dt_range[-1] + sym_len * 7
+    total_len_sec = COSTAS_START_OFFSET_SEC + FT8_SYMBOLS_PER_MESSAGE * FT8_SYMBOL_LENGTH_IN_SEC
+    num_samples = int(total_len_sec * sample_rate_in_hz)
     noise = [random.uniform(-1e-2, 1e-2) for _ in range(num_samples)]
     noise_audio = RealSamples(noise, sample_rate_in_hz)
-    cands = find_candidates(noise_audio, freq_range, dt_range, threshold=0.002)
+    cands = find_candidates(noise_audio, max_freq_bin, max_dt_symbols, threshold=0.002)
     assert not cands

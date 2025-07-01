@@ -1,5 +1,4 @@
 # Basic candidate search for FT8 Costas sequence
-import math
 import numpy as np
 from typing import List, Tuple
 
@@ -10,32 +9,21 @@ from utils import (
     COSTAS_START_OFFSET_SEC,
 )
 
+# Number of FFT bins used per symbol bin. This controls the zero-padding
+# applied to each symbol prior to the FFT and therefore the frequency
+# resolution of the search.
+FREQ_SEARCH_OVERSAMPLING_RATIO = 2
 
-def dft_mag(
-    samples: np.ndarray,
-    sample_rate: int,
-    start_dt_in_samples: int,
-    freq_in_hz: float,
-    length_in_samples: int,
-) -> float:
-    """Return DFT magnitude for ``length_in_samples`` samples starting at
-    ``start_dt_in_samples``.
-
-    The computation uses a vectorized dot product which is considerably
-    faster than iterating over each sample in Python.
-    """
-    n = np.arange(length_in_samples)
-    angle = -2j * math.pi * freq_in_hz / sample_rate
-    segment = samples[start_dt_in_samples : start_dt_in_samples + length_in_samples]
-    exps = np.exp(angle * n)
-    # Normalize the DFT magnitude so a unit amplitude tone produces 1.0
-    return abs(np.dot(segment, exps)) / float(length_in_samples)
-
-
+# COSTAS sequence indices scaled by the oversampling ratio.  These indices
+# point to the FFT bins for each Costas tone when the FFT length is
+# ``sym_len * FREQ_SEARCH_OVERSAMPLING_RATIO``.
+EXPANDED_COSTAS_SEQUENCE = [
+    tone * FREQ_SEARCH_OVERSAMPLING_RATIO for tone in COSTAS_SEQUENCE
+]
 def find_candidates(
     samples_in: RealSamples,
-    freq_range_in_hz: List[float],
-    dt_range_in_samples: List[int],
+    max_freq_bin: int,
+    max_dt_in_symbols: int,
     threshold: float,
 ) -> List[Tuple[float, float, float]]:
     """Search ``samples_in`` for possible Costas sync locations.
@@ -44,10 +32,14 @@ def find_candidates(
     ----------
     samples_in:
         Audio samples with associated sample rate.
-    freq_range_in_hz:
-        List of base frequencies to search in Hz.
-    dt_range_in_samples:
-        List of sample offsets for candidate positions.
+    max_freq_bin:
+        Highest base frequency bin to search, expressed in units of the
+        FT8 tone spacing. All base frequencies from 0 to ``max_freq_bin`` are
+        examined.
+    max_dt_in_symbols:
+        Maximum candidate start offset in whole symbols. The search only
+        examines offsets that are aligned to the 1920-sample symbol width so
+        a single set of FFTs can be reused for every candidate position.
     threshold:
         Minimum accumulated DFT magnitude to be considered a candidate.
 
@@ -56,26 +48,42 @@ def find_candidates(
     List[Tuple[float, float, float]]
         Tuples of ``(score, time_offset_sec, base_frequency)`` sorted by score.
 
-    This implementation ignores some aspects of the WSJT-X search such as
-    forward error correction metrics and uses a coarse DFT rather than an
-    FFT-based correlator, so it is far less sensitive.  The ``time_offset_sec``
-    returned for each candidate is adjusted by ``COSTAS_START_OFFSET_SEC`` so
-    it lines up with the timestamp reported by WSJT-X.
+    This implementation ignores several aspects of the WSJT-X search such as
+    forward error correction metrics.  The ``time_offset_sec`` returned for
+    each candidate is adjusted by ``COSTAS_START_OFFSET_SEC`` so it lines up
+    with the timestamp reported by WSJT-X.
     """
     samples = samples_in.samples
     sample_rate = samples_in.sample_rate_in_hz
     sym_len = int(round(sample_rate / TONE_SPACING_IN_HZ))
+    fft_len = sym_len * FREQ_SEARCH_OVERSAMPLING_RATIO
+
+    num_ffts = min(
+        max_dt_in_symbols + len(COSTAS_SEQUENCE),
+        (len(samples) - sym_len) // sym_len + 1,
+    )
+
+    ffts = []
+    for idx in range(num_ffts):
+        start = idx * sym_len
+        seg = samples[start : start + sym_len]
+        seg = np.pad(seg, (0, fft_len - sym_len))
+        ffts.append(np.fft.rfft(seg) / sym_len)
+    ffts = np.asarray(ffts)
+
     results = []
-    for start in dt_range_in_samples:
-        if start + sym_len * len(COSTAS_SEQUENCE) > len(samples):
-            continue
-        for freq in freq_range_in_hz:
+    for dt_sym in range(max_dt_in_symbols + 1):
+        if dt_sym + len(COSTAS_SEQUENCE) > len(ffts):
+            break
+        for base_tone_bin in range(max_freq_bin + 1):
             score = 0.0
-            for idx, tone in enumerate(COSTAS_SEQUENCE):
-                f = freq + tone * TONE_SPACING_IN_HZ
-                score += dft_mag(samples, sample_rate, start + idx * sym_len, f, sym_len)
+            base_expanded_tone_bin = base_tone_bin * FREQ_SEARCH_OVERSAMPLING_RATIO
+            for sync_idx, expanded_sync_bin in enumerate(EXPANDED_COSTAS_SEQUENCE):
+                bin_idx = base_expanded_tone_bin + expanded_sync_bin
+                score += abs(ffts[dt_sym + sync_idx][bin_idx])
             if score >= threshold:
-                dt = start / sample_rate - COSTAS_START_OFFSET_SEC
-                results.append((score, dt, freq))
+                dt = dt_sym * sym_len / sample_rate - COSTAS_START_OFFSET_SEC
+                base_freq = base_tone_bin * TONE_SPACING_IN_HZ
+                results.append((score, dt, base_freq))
     results.sort(reverse=True)
     return results
