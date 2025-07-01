@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 import wave
-import struct
-from typing import List
+import numpy as np
 
 # Order of tones forming the 7-symbol Costas sync sequence.  Each value
 # is the tone index (0-7) transmitted for one of the seven sync symbols.
@@ -23,8 +22,12 @@ COSTAS_START_OFFSET_SEC = 0.5
 class RealSamples:
     """Simple container for real-valued samples and their sampling rate."""
 
-    samples: List[float]
+    samples: np.ndarray
     sample_rate_in_hz: int
+
+    def __post_init__(self) -> None:
+        """Ensure that ``samples`` is a NumPy ``float`` array."""
+        self.samples = np.asarray(self.samples, dtype=float)
 
 
 def read_wav(path: str) -> RealSamples:
@@ -35,15 +38,15 @@ def read_wav(path: str) -> RealSamples:
         frames = w.readframes(nframes)
         sample_width = w.getsampwidth()
         if sample_width == 2:
-            fmt = f"<{nframes}h"
+            dtype = np.int16
             max_val = 32768.0
         elif sample_width == 1:
-            fmt = f"<{nframes}b"
+            dtype = np.int8
             max_val = 128.0
         else:
             raise ValueError("Unsupported sample width")
-        ints = struct.unpack(fmt, frames)
-        samples = [s / max_val for s in ints]
+        ints = np.frombuffer(frames, dtype=dtype)
+        samples = ints.astype(float) / max_val
         return RealSamples(samples=samples, sample_rate_in_hz=sample_rate_in_hz)
 
 __all__ = [
