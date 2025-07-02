@@ -1,7 +1,11 @@
 import subprocess
 from pathlib import Path
 
-from tests.utils import generate_ft8_wav
+from tests.utils import (
+    generate_ft8_wav,
+    DEFAULT_FREQ_EPS,
+    DEFAULT_DT_EPS,
+)
 
 
 def decode_ft8_wav(path: Path) -> str:
@@ -36,6 +40,6 @@ def test_ft8sim_to_jt9(tmp_path):
 
     assert decoded_msg == msg
     assert abs(snr - (-10)) <= 1.0
-    assert abs(dt - 0.0) < 0.2
+    assert abs(dt - 0.0) < DEFAULT_DT_EPS
     assert abs(freq - 1500) < 2.0
 
