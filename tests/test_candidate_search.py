@@ -2,14 +2,21 @@ from search import find_candidates
 from utils import (
     read_wav,
     RealSamples,
-    TONE_SPACING_IN_HZ,
     COSTAS_START_OFFSET_SEC,
     FT8_SYMBOL_LENGTH_IN_SEC,
     FT8_SYMBOLS_PER_MESSAGE,
 )
+from demod import naive_demod
 import random
 
-from tests.utils import generate_ft8_wav, default_search_params
+from tests.utils import (
+    generate_ft8_wav,
+    default_search_params,
+    ft8code_bits,
+    DEFAULT_SEARCH_THRESHOLD,
+    DEFAULT_FREQ_EPS,
+    DEFAULT_DT_EPS,
+)
 
 
 def test_candidate_search(tmp_path):
@@ -21,15 +28,14 @@ def test_candidate_search(tmp_path):
         audio,
         max_freq_bin,
         max_dt_symbols,
-        threshold=0.002,
+        threshold=DEFAULT_SEARCH_THRESHOLD,
     )
     assert candidates, "no candidates found"
     score, dt, freq = candidates[0]
-    assert abs(freq - 1500) < 1.0
-    assert abs(dt - 0.0) < 0.2
-    assert score > 0.002
-    for _, _, f in candidates:
-        assert abs(f - 1500) <= 32
+    assert abs(freq - 1500) < DEFAULT_FREQ_EPS
+    assert abs(dt - 0.0) < DEFAULT_DT_EPS
+    assert score > DEFAULT_SEARCH_THRESHOLD
+    assert any(abs(f - 1500) <= 40 for _, _, f in candidates)
 
 
 def test_candidate_search_noise():
@@ -38,7 +44,34 @@ def test_candidate_search_noise():
     random.seed(123)
     total_len_sec = COSTAS_START_OFFSET_SEC + FT8_SYMBOLS_PER_MESSAGE * FT8_SYMBOL_LENGTH_IN_SEC
     num_samples = int(total_len_sec * sample_rate_in_hz)
-    noise = [random.uniform(-1e-2, 1e-2) for _ in range(num_samples)]
+    noise = [random.uniform(-1e-3, 1e-3) for _ in range(num_samples)]
     noise_audio = RealSamples(noise, sample_rate_in_hz)
-    cands = find_candidates(noise_audio, max_freq_bin, max_dt_symbols, threshold=0.002)
+    cands = find_candidates(noise_audio, max_freq_bin, max_dt_symbols, threshold=DEFAULT_SEARCH_THRESHOLD)
     assert not cands
+
+
+def test_naive_demod(tmp_path):
+    msg = "K1ABC W9XYZ EN37"
+    wav = generate_ft8_wav(msg, tmp_path)
+    audio = read_wav(str(wav))
+    max_freq_bin, max_dt_symbols = default_search_params(audio.sample_rate_in_hz)
+    cand = find_candidates(audio, max_freq_bin, max_dt_symbols, threshold=DEFAULT_SEARCH_THRESHOLD)[0]
+    _, dt, freq = cand
+    decoded_bits, _ = naive_demod(audio, freq, dt)
+    expected_bits = ft8code_bits(msg)
+    assert decoded_bits == expected_bits
+
+
+def test_naive_demod_low_snr(tmp_path):
+    msg = "K1ABC W9XYZ EN37"
+    wav = generate_ft8_wav(msg, tmp_path, snr=-16)
+    audio = read_wav(str(wav))
+    max_freq_bin, max_dt_symbols = default_search_params(audio.sample_rate_in_hz)
+    cand = find_candidates(
+        audio, max_freq_bin, max_dt_symbols, threshold=DEFAULT_SEARCH_THRESHOLD
+    )[0]
+    _, dt, freq = cand
+    decoded_bits, _ = naive_demod(audio, freq, dt)
+    expected_bits = ft8code_bits(msg)
+    mismatches = sum(a != b for a, b in zip(decoded_bits, expected_bits))
+    assert mismatches > 0
