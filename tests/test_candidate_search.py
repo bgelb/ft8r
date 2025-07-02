@@ -5,6 +5,7 @@ from utils import (
     COSTAS_START_OFFSET_SEC,
     FT8_SYMBOL_LENGTH_IN_SEC,
     FT8_SYMBOLS_PER_MESSAGE,
+    check_crc,
 )
 from demod import naive_demod
 import random
@@ -60,6 +61,7 @@ def test_naive_demod(tmp_path):
     decoded_bits, _ = naive_demod(audio, freq, dt)
     expected_bits = ft8code_bits(msg)
     assert decoded_bits == expected_bits
+    assert check_crc(decoded_bits)
 
 
 def test_naive_demod_low_snr(tmp_path):
@@ -75,3 +77,4 @@ def test_naive_demod_low_snr(tmp_path):
     expected_bits = ft8code_bits(msg)
     mismatches = sum(a != b for a, b in zip(decoded_bits, expected_bits))
     assert mismatches > 0
+    assert not check_crc(decoded_bits)
