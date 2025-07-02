@@ -2,6 +2,8 @@ from dataclasses import dataclass
 import wave
 import numpy as np
 
+from .ldpc_matrix import LDPC_174_91_H
+
 # Order of tones forming the 7-symbol Costas sync sequence.  Each value
 # is the tone index (0-7) transmitted for one of the seven sync symbols.
 # The arrangement ensures that every tone pair is unique, allowing the
@@ -93,4 +95,5 @@ __all__ = [
     "FT8_SYMBOLS_PER_MESSAGE",
     "calc_crc",
     "check_crc",
+    "LDPC_174_91_H",
 ]
