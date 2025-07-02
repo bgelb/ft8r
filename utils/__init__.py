@@ -25,6 +25,33 @@ FT8_SYMBOL_LENGTH_IN_SEC = 1.0 / TONE_SPACING_IN_HZ
 FT8_SYMBOLS_PER_MESSAGE = 79
 
 
+CRC_POLY = 0x21F2
+
+
+def calc_crc(bits: str) -> int:
+    """Return the 14-bit CRC of ``bits``.
+
+    The bit order matches that produced by ``ft8code`` and
+    :func:`demod.naive_demod`.
+    """
+    crc = 0
+    for b in bits:
+        feedback = (crc & 1) ^ (b == "1")
+        crc >>= 1
+        if feedback:
+            crc ^= CRC_POLY
+    return crc
+
+
+def check_crc(bitstring: str) -> bool:
+    """Validate the CRC embedded in a 174-bit FT8 payload."""
+    if len(bitstring) != 174:
+        raise ValueError("bitstring must contain 174 bits")
+    msg_bits = bitstring[:77]
+    crc_bits = int(bitstring[77:91], 2)
+    return calc_crc(msg_bits) == crc_bits
+
+
 @dataclass
 class RealSamples:
     """Simple container for real-valued samples and their sampling rate."""
@@ -64,4 +91,6 @@ __all__ = [
     "COSTAS_START_OFFSET_SEC",
     "FT8_SYMBOL_LENGTH_IN_SEC",
     "FT8_SYMBOLS_PER_MESSAGE",
+    "calc_crc",
+    "check_crc",
 ]
