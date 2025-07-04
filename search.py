@@ -103,13 +103,14 @@ def find_candidates(
     available_ffts = (len(samples) - sym_len) // step + 1
     num_ffts = min(required_ffts, available_ffts)
 
-    ffts = []
-    for idx in range(num_ffts):
-        start = idx * step
-        seg = samples[start : start + sym_len]
-        seg = np.pad(seg, (0, fft_len - sym_len))
-        ffts.append(np.fft.rfft(seg) / sym_len)
-    ffts = np.asarray(ffts)
+    # Build a matrix of overlapping windows so all FFTs can be computed in one
+    # vectorized operation. ``sliding_window_view`` creates ``sym_len`` sample
+    # segments spaced ``step`` samples apart without copying the underlying
+    # data.
+    segs = np.lib.stride_tricks.sliding_window_view(samples, sym_len)[::step]
+    segs = segs[:num_ffts]
+    segs = np.pad(segs, ((0, 0), (0, fft_len - sym_len)))
+    ffts = np.fft.rfft(segs, axis=1) / sym_len
 
     fft_pwr = np.abs(ffts) ** 2
 
@@ -124,25 +125,39 @@ def find_candidates(
         (scores_map.shape[1] - 1) // FREQ_SEARCH_OVERSAMPLING_RATIO,
     )
 
-    results = []
-    for dt_idx in range(max_dt_idx + 1):
-        dt = dt_idx * step / sample_rate - COSTAS_START_OFFSET_SEC
-        active_rows = [active_map[dt_idx + off]
-                       for off in offsets
-                       if dt_idx + off < num_windows]
-        noise_rows = [noise_map[dt_idx + off]
-                       for off in offsets
-                       if dt_idx + off < num_windows]
-        if not active_rows:
-            continue
-        for base_bin in range(max_base_bin + 1):
-            col = base_bin * FREQ_SEARCH_OVERSAMPLING_RATIO
-            active = sum(row[col] for row in active_rows)
-            noise = sum(row[col] for row in noise_rows)
-            score = float(active / (noise + 1e-12)) * len(active_rows)
-            if score >= threshold:
-                base_freq = base_bin * TONE_SPACING_IN_HZ
-                results.append((score, dt, base_freq))
+    # Gather all offsets for the three Costas blocks at once. ``idx`` has shape
+    # ``(3, max_dt_idx + 1)`` where each row corresponds to one Costas block
+    # offset.  Rows that would fall past the end of ``active_map`` are clipped
+    # and later ignored using ``valid``.
+    idx = np.array(offsets)[:, None] + np.arange(max_dt_idx + 1)
+    valid = idx < num_windows
+    idx = np.clip(idx, 0, num_windows - 1)
+
+    active = active_map[idx] * valid[:, :, None]
+    noise = noise_map[idx] * valid[:, :, None]
+    active = active.sum(axis=0)
+    noise = noise.sum(axis=0)
+
+    # ``num_blocks`` records how many Costas blocks contributed at each time
+    # offset (1 to 3).
+    num_blocks = valid.sum(axis=0)
+    scores = (active / (noise + 1e-12)) * num_blocks[:, None]
+
+    # Only evaluate base frequencies aligned to actual FT8 tones.
+    scores = scores[:, : (max_base_bin + 1) * FREQ_SEARCH_OVERSAMPLING_RATIO + 1]
+    scores = scores[:, ::FREQ_SEARCH_OVERSAMPLING_RATIO]
+
+    dts = (
+        np.arange(max_dt_idx + 1) * step / sample_rate - COSTAS_START_OFFSET_SEC
+    )
+    freqs = np.arange(max_base_bin + 1) * TONE_SPACING_IN_HZ
+
+    mask = scores >= threshold
+    dt_idx, freq_idx = np.nonzero(mask)
+    results = [
+        (float(scores[i, j]), float(dts[i]), float(freqs[j]))
+        for i, j in zip(dt_idx, freq_idx)
+    ]
 
     results.sort(reverse=True)
     return results

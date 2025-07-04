@@ -59,21 +59,36 @@ def soft_demod(samples_in: RealSamples, freq: float, dt: float) -> np.ndarray:
         -2j * np.pi * (freq + np.arange(8) * TONE_SPACING_IN_HZ)[:, None] * time_idx
     )
 
-    llrs: List[float] = []
-    for sym in range(FT8_SYMBOLS_PER_MESSAGE):
-        seg = samples[start + sym * sym_len : start + (sym + 1) * sym_len]
-        assert len(seg) == sym_len, "ran out of samples"
-        resp = np.abs(np.matmul(bases, seg))
-        if sym in COSTAS_POSITIONS:
-            continue
-        probs = resp / np.sum(resp)
-        for bit in range(3):
-            ones = probs[[i for i in range(8) if (GRAY_MAP[i] >> (2 - bit)) & 1]]
-            zeros = probs[[i for i in range(8) if not ((GRAY_MAP[i] >> (2 - bit)) & 1)]]
-            llr = np.log(np.sum(ones) + 1e-12) - np.log(np.sum(zeros) + 1e-12)
-            llrs.append(llr)
+    # Arrange the input samples into one matrix containing every symbol.  Each
+    # row corresponds to one symbol worth of data.  This allows the tone
+    # responses for all symbols to be computed in a single matrix
+    # multiplication.
+    seg = samples[start : start + sym_len * FT8_SYMBOLS_PER_MESSAGE]
+    seg = seg.reshape(FT8_SYMBOLS_PER_MESSAGE, sym_len)
 
-    return np.asarray(llrs)
+    # ``resp`` has shape ``(8, FT8_SYMBOLS_PER_MESSAGE)`` and contains the
+    # magnitude response of each tone for every symbol.
+    resp = np.abs(bases @ seg.T)
+
+    # Remove the Costas symbols used for synchronization.
+    payload_resp = np.delete(resp, COSTAS_POSITIONS, axis=1)
+
+    # Normalize to per-symbol probabilities.
+    probs = payload_resp / payload_resp.sum(axis=0, keepdims=True)
+
+    # Pre-build Gray-code bit masks to compute log-likelihood ratios with
+    # broadcasting. ``gray_bits`` has shape ``(3, 8)`` where each row selects the
+    # tones contributing a ``1`` for that bit position.
+    gray_bits = np.array(
+        [[(g >> (2 - b)) & 1 for g in GRAY_MAP] for b in range(3)], dtype=bool
+    )
+
+    mask = gray_bits[:, :, None]
+    ones = np.where(mask, probs[None, :, :], 0).sum(axis=1)
+    zeros = np.where(~mask, probs[None, :, :], 0).sum(axis=1)
+    llrs = np.log(ones + 1e-12) - np.log(zeros + 1e-12)
+
+    return llrs.T.ravel()
 
 
 def naive_hard_decode(llrs: np.ndarray) -> str:
