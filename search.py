@@ -49,6 +49,12 @@ for sym_idx, bin_offset in enumerate(EXPANDED_COSTAS_SEQUENCE):
         col = tone * FREQ_SEARCH_OVERSAMPLING_RATIO
         if tone != COSTAS_SEQUENCE[sym_idx]:
             _NOISE_KERNEL[row, col] = 1.0
+
+# Offsets of the three Costas sync blocks within an FT8 transmission.  Each
+# value is the starting symbol index for one 7-symbol Costas sequence.  The
+# offsets are measured relative to the nominal start of the transmission.
+COSTAS_BLOCK_OFFSETS = [0, 36, 72]
+
 def find_candidates(
     samples_in: RealSamples,
     max_freq_bin: int,
@@ -89,8 +95,11 @@ def find_candidates(
     fft_len = sym_len * FREQ_SEARCH_OVERSAMPLING_RATIO
     step = sym_len // TIME_SEARCH_OVERSAMPLING_RATIO
 
+    offsets = [off * TIME_SEARCH_OVERSAMPLING_RATIO for off in COSTAS_BLOCK_OFFSETS]
+    max_offset = offsets[-1]
+
     max_dt_idx = max_dt_in_symbols * TIME_SEARCH_OVERSAMPLING_RATIO
-    required_ffts = max_dt_idx + _KERNEL_TIME_LEN
+    required_ffts = max_dt_idx + max_offset + _KERNEL_TIME_LEN
     available_ffts = (len(samples) - sym_len) // step + 1
     num_ffts = min(required_ffts, available_ffts)
 
@@ -117,10 +126,20 @@ def find_candidates(
 
     results = []
     for dt_idx in range(max_dt_idx + 1):
-        row = scores_map[dt_idx]
         dt = dt_idx * step / sample_rate - COSTAS_START_OFFSET_SEC
+        active_rows = [active_map[dt_idx + off]
+                       for off in offsets
+                       if dt_idx + off < num_windows]
+        noise_rows = [noise_map[dt_idx + off]
+                       for off in offsets
+                       if dt_idx + off < num_windows]
+        if not active_rows:
+            continue
         for base_bin in range(max_base_bin + 1):
-            score = float(row[base_bin * FREQ_SEARCH_OVERSAMPLING_RATIO])
+            col = base_bin * FREQ_SEARCH_OVERSAMPLING_RATIO
+            active = sum(row[col] for row in active_rows)
+            noise = sum(row[col] for row in noise_rows)
+            score = float(active / (noise + 1e-12)) * len(active_rows)
             if score >= threshold:
                 base_freq = base_bin * TONE_SPACING_IN_HZ
                 results.append((score, dt, base_freq))
