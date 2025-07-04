@@ -32,7 +32,7 @@ EXPANDED_COSTAS_SEQUENCE = [
 # be implemented as a 2‑D cross-correlation against the FFT magnitude matrix.
 _KERNEL_TIME_LEN = TIME_SEARCH_OVERSAMPLING_RATIO * (len(COSTAS_SEQUENCE) - 1) + 1
 # Number of tone bins spanned by the Costas kernel in the frequency dimension.
-COSTAS_KERNEL_NUM_TONES = 7
+COSTAS_KERNEL_NUM_TONES = 8
 _KERNEL_FREQ_LEN = (
     COSTAS_KERNEL_NUM_TONES
     + (COSTAS_KERNEL_NUM_TONES - 1) * (FREQ_SEARCH_OVERSAMPLING_RATIO - 1)
@@ -40,6 +40,15 @@ _KERNEL_FREQ_LEN = (
 _COSTAS_KERNEL = np.zeros((_KERNEL_TIME_LEN, _KERNEL_FREQ_LEN))
 for sym_idx, bin_offset in enumerate(EXPANDED_COSTAS_SEQUENCE):
     _COSTAS_KERNEL[sym_idx * TIME_SEARCH_OVERSAMPLING_RATIO, bin_offset] = 1.0
+
+# Kernel used to measure noise power in the unused Costas bins.
+_NOISE_KERNEL = np.zeros_like(_COSTAS_KERNEL)
+for sym_idx, bin_offset in enumerate(EXPANDED_COSTAS_SEQUENCE):
+    row = sym_idx * TIME_SEARCH_OVERSAMPLING_RATIO
+    for tone in range(COSTAS_KERNEL_NUM_TONES):
+        col = tone * FREQ_SEARCH_OVERSAMPLING_RATIO
+        if tone != COSTAS_SEQUENCE[sym_idx]:
+            _NOISE_KERNEL[row, col] = 1.0
 def find_candidates(
     samples_in: RealSamples,
     max_freq_bin: int,
@@ -61,7 +70,8 @@ def find_candidates(
         examines offsets that are aligned to the 1920-sample symbol width so
         a single set of FFTs can be reused for every candidate position.
     threshold:
-        Minimum accumulated DFT magnitude to be considered a candidate.
+        Minimum ratio of Costas power to noise power required for a
+        position to be considered a candidate.
 
     Returns
     -------
@@ -92,9 +102,11 @@ def find_candidates(
         ffts.append(np.fft.rfft(seg) / sym_len)
     ffts = np.asarray(ffts)
 
-    fft_mags = np.abs(ffts)
+    fft_pwr = np.abs(ffts) ** 2
 
-    scores_map = correlate2d(fft_mags, _COSTAS_KERNEL, mode="valid")
+    active_map = correlate2d(fft_pwr, _COSTAS_KERNEL, mode="valid")
+    noise_map = correlate2d(fft_pwr, _NOISE_KERNEL, mode="valid")
+    scores_map = active_map / (noise_map + 1e-12)
 
     num_windows = scores_map.shape[0]
     max_dt_idx = min(max_dt_idx, num_windows - 1)
