@@ -27,7 +27,7 @@ def test_perfect_sync_detection():
 
     audio = RealSamples(samples, sample_rate)
     max_freq_bin, max_dt_symbols = default_search_params(sample_rate)
-    candidates = find_candidates(audio, max_freq_bin, max_dt_symbols, threshold=0.1)
+    candidates = find_candidates(audio, max_freq_bin, max_dt_symbols, threshold=1.0)
     assert candidates
     score, dt, freq = candidates[0]
     expected_dt = (start // sym_len) * sym_len / sample_rate - COSTAS_START_OFFSET_SEC

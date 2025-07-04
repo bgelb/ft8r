@@ -1,7 +1,7 @@
 from pathlib import Path
 import subprocess
 
-DEFAULT_SEARCH_THRESHOLD = 0.001
+DEFAULT_SEARCH_THRESHOLD = 1.0
 
 # Epsilon for validating decoded frequency in tests (Hz)
 DEFAULT_FREQ_EPS = 1.0
