@@ -66,6 +66,12 @@ def default_search_params(sample_rate_in_hz: int):
 
     sym_len = int(sample_rate_in_hz / TONE_SPACING_IN_HZ)
     max_freq_bin = int(2500 / TONE_SPACING_IN_HZ)
-    max_dt_samples = int(sample_rate_in_hz * 2)
-    max_dt_symbols = max_dt_samples // sym_len
+    # Limit the Costas search to a window starting at the beginning of the
+    # 15 second cycle and ending 3.12 seconds later.  This window spans a
+    # 0.5 s pre interval, the seven Costas symbols (7 * 0.16 s) and an
+    # additional 1.5 s of trailing audio.  ``max_dt_samples`` controls the
+    # furthest point in the input audio examined by :func:`search.find_candidates`.
+    max_dt_samples = int(sample_rate_in_hz * 3.12)
+    # ``max_dt_symbols`` is rounded up so the 3.12 s window is fully included
+    max_dt_symbols = -(-max_dt_samples // sym_len)
     return max_freq_bin, max_dt_symbols
