@@ -1,5 +1,6 @@
 # Basic candidate search for FT8 Costas sequence
 import numpy as np
+from scipy.signal import correlate2d
 from typing import List, Tuple
 
 from utils import (
@@ -14,12 +15,31 @@ from utils import (
 # resolution of the search.
 FREQ_SEARCH_OVERSAMPLING_RATIO = 2
 
+# Number of candidate start offsets evaluated per symbol period.  A value of
+# ``4`` means each subsequent Costas sync position begins one quarter of a
+# symbol after the previous one.
+TIME_SEARCH_OVERSAMPLING_RATIO = 4
+
 # COSTAS sequence indices scaled by the oversampling ratio.  These indices
 # point to the FFT bins for each Costas tone when the FFT length is
 # ``sym_len * FREQ_SEARCH_OVERSAMPLING_RATIO``.
 EXPANDED_COSTAS_SEQUENCE = [
     tone * FREQ_SEARCH_OVERSAMPLING_RATIO for tone in COSTAS_SEQUENCE
 ]
+
+# Convolution kernel used to locate the Costas sync sequence.  It accounts for
+# both the frequency and time oversampling patterns so that candidate search can
+# be implemented as a 2‑D cross-correlation against the FFT magnitude matrix.
+_KERNEL_TIME_LEN = TIME_SEARCH_OVERSAMPLING_RATIO * (len(COSTAS_SEQUENCE) - 1) + 1
+# Number of tone bins spanned by the Costas kernel in the frequency dimension.
+COSTAS_KERNEL_NUM_TONES = 7
+_KERNEL_FREQ_LEN = (
+    COSTAS_KERNEL_NUM_TONES
+    + (COSTAS_KERNEL_NUM_TONES - 1) * (FREQ_SEARCH_OVERSAMPLING_RATIO - 1)
+)
+_COSTAS_KERNEL = np.zeros((_KERNEL_TIME_LEN, _KERNEL_FREQ_LEN))
+for sym_idx, bin_offset in enumerate(EXPANDED_COSTAS_SEQUENCE):
+    _COSTAS_KERNEL[sym_idx * TIME_SEARCH_OVERSAMPLING_RATIO, bin_offset] = 1.0
 def find_candidates(
     samples_in: RealSamples,
     max_freq_bin: int,
@@ -57,33 +77,41 @@ def find_candidates(
     sample_rate = samples_in.sample_rate_in_hz
     sym_len = int(round(sample_rate / TONE_SPACING_IN_HZ))
     fft_len = sym_len * FREQ_SEARCH_OVERSAMPLING_RATIO
+    step = sym_len // TIME_SEARCH_OVERSAMPLING_RATIO
 
-    num_ffts = min(
-        max_dt_in_symbols + len(COSTAS_SEQUENCE),
-        (len(samples) - sym_len) // sym_len + 1,
-    )
+    max_dt_idx = max_dt_in_symbols * TIME_SEARCH_OVERSAMPLING_RATIO
+    required_ffts = max_dt_idx + _KERNEL_TIME_LEN
+    available_ffts = (len(samples) - sym_len) // step + 1
+    num_ffts = min(required_ffts, available_ffts)
 
     ffts = []
     for idx in range(num_ffts):
-        start = idx * sym_len
+        start = idx * step
         seg = samples[start : start + sym_len]
         seg = np.pad(seg, (0, fft_len - sym_len))
         ffts.append(np.fft.rfft(seg) / sym_len)
     ffts = np.asarray(ffts)
 
+    fft_mags = np.abs(ffts)
+
+    scores_map = correlate2d(fft_mags, _COSTAS_KERNEL, mode="valid")
+
+    num_windows = scores_map.shape[0]
+    max_dt_idx = min(max_dt_idx, num_windows - 1)
+    max_base_bin = min(
+        max_freq_bin,
+        (scores_map.shape[1] - 1) // FREQ_SEARCH_OVERSAMPLING_RATIO,
+    )
+
     results = []
-    for dt_sym in range(max_dt_in_symbols + 1):
-        if dt_sym + len(COSTAS_SEQUENCE) > len(ffts):
-            break
-        for base_tone_bin in range(max_freq_bin + 1):
-            score = 0.0
-            base_expanded_tone_bin = base_tone_bin * FREQ_SEARCH_OVERSAMPLING_RATIO
-            for sync_idx, expanded_sync_bin in enumerate(EXPANDED_COSTAS_SEQUENCE):
-                bin_idx = base_expanded_tone_bin + expanded_sync_bin
-                score += abs(ffts[dt_sym + sync_idx][bin_idx])
+    for dt_idx in range(max_dt_idx + 1):
+        row = scores_map[dt_idx]
+        dt = dt_idx * step / sample_rate - COSTAS_START_OFFSET_SEC
+        for base_bin in range(max_base_bin + 1):
+            score = float(row[base_bin * FREQ_SEARCH_OVERSAMPLING_RATIO])
             if score >= threshold:
-                dt = dt_sym * sym_len / sample_rate - COSTAS_START_OFFSET_SEC
-                base_freq = base_tone_bin * TONE_SPACING_IN_HZ
+                base_freq = base_bin * TONE_SPACING_IN_HZ
                 results.append((score, dt, base_freq))
+
     results.sort(reverse=True)
     return results
