@@ -7,7 +7,11 @@ from utils import (
     FT8_SYMBOLS_PER_MESSAGE,
     check_crc,
 )
-from demod import soft_demod, naive_hard_decode, downsample_to_baseband
+from demod import (
+    soft_demod,
+    naive_hard_decode,
+    fine_sync_candidate,
+)
 import random
 
 from tests.utils import (
@@ -58,8 +62,8 @@ def test_naive_demod(tmp_path):
     max_freq_bin, max_dt_symbols = default_search_params(audio.sample_rate_in_hz)
     cand = find_candidates(audio, max_freq_bin, max_dt_symbols, threshold=DEFAULT_SEARCH_THRESHOLD)[0]
     _, dt, freq = cand
-    bb = downsample_to_baseband(audio, freq)
-    llrs = soft_demod(bb, 0.0, dt)
+    bb, dt_f, freq_f = fine_sync_candidate(audio, freq, dt)
+    llrs = soft_demod(bb)
     decoded_bits = naive_hard_decode(llrs)
     expected_bits = ft8code_bits(msg)
     assert decoded_bits == expected_bits
@@ -75,8 +79,8 @@ def test_naive_demod_low_snr(tmp_path):
         audio, max_freq_bin, max_dt_symbols, threshold=DEFAULT_SEARCH_THRESHOLD
     )[0]
     _, dt, freq = cand
-    bb = downsample_to_baseband(audio, freq)
-    llrs = soft_demod(bb, 0.0, dt)
+    bb, dt_f, freq_f = fine_sync_candidate(audio, freq, dt)
+    llrs = soft_demod(bb)
     decoded_bits = naive_hard_decode(llrs)
     expected_bits = ft8code_bits(msg)
     mismatches = sum(a != b for a, b in zip(decoded_bits, expected_bits))

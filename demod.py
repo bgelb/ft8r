@@ -1,10 +1,12 @@
 import numpy as np
 
 import ldpc
+from typing import Tuple
 
 from utils import (
     RealSamples,
     ComplexSamples,
+    COSTAS_SEQUENCE,
     TONE_SPACING_IN_HZ,
     COSTAS_START_OFFSET_SEC,
     FT8_SYMBOL_LENGTH_IN_SEC,
@@ -102,27 +104,101 @@ def downsample_to_baseband(samples_in: RealSamples, freq: float) -> ComplexSampl
     return ComplexSamples(time_series, sample_rate_in_hz=BASEBAND_RATE_HZ)
 
 
-def soft_demod(samples_in: ComplexSamples, freq: float, dt: float) -> np.ndarray:
+def _costas_energy(
+    samples: ComplexSamples, start: int, freq_offset_hz: float
+) -> float:
+    """Return the power in the Costas symbols at ``start`` with ``freq_offset_hz``."""
+
+    sample_rate = samples.sample_rate_in_hz
+    sym_len = int(round(sample_rate * FT8_SYMBOL_LENGTH_IN_SEC))
+    seg = samples.samples[start : start + sym_len * FT8_SYMBOLS_PER_MESSAGE]
+    seg = seg.reshape(FT8_SYMBOLS_PER_MESSAGE, sym_len)
+
+    time_idx = np.arange(sym_len) / sample_rate
+    bases = np.exp(
+        -2j
+        * np.pi
+        * (freq_offset_hz + np.arange(8) * TONE_SPACING_IN_HZ)[:, None]
+        * time_idx
+    )
+
+    resp = np.abs(bases @ seg.T) ** 2
+
+    tones = COSTAS_SEQUENCE * 3
+    energy = resp[tones, COSTAS_POSITIONS].sum()
+    return float(energy)
+
+
+def fine_time_sync(samples: ComplexSamples, dt: float, search: int) -> float:
+    """Return refined ``dt`` by maximizing Costas energy around ``dt``."""
+
+    sample_rate = samples.sample_rate_in_hz
+    base_start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
+
+    offsets = range(-search, search + 1)
+    energies = [
+        _costas_energy(samples, base_start + off, 0.0) for off in offsets
+    ]
+    best = int(np.argmax(energies))
+    best_off = offsets[best]
+    return dt + best_off / sample_rate
+
+
+def fine_freq_sync(
+    samples: ComplexSamples, dt: float, search_hz: float, step_hz: float
+) -> float:
+    """Return frequency offset maximizing Costas energy."""
+
+    sample_rate = samples.sample_rate_in_hz
+    start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
+    freqs = np.arange(-search_hz, search_hz + step_hz / 2, step_hz)
+    energies = [_costas_energy(samples, start, f) for f in freqs]
+    best = int(np.argmax(energies))
+    return float(freqs[best])
+
+
+def fine_sync_candidate(
+    samples_in: RealSamples, freq: float, dt: float
+) -> Tuple[ComplexSamples, float, float]:
+    """Return finely aligned baseband, ``dt`` and ``freq`` for ``samples_in``."""
+
+    bb = downsample_to_baseband(samples_in, freq)
+
+    dt = fine_time_sync(bb, dt, 10)
+    df = fine_freq_sync(bb, dt, 2.5, 0.5)
+    freq += df
+
+    bb = downsample_to_baseband(samples_in, freq)
+
+    dt = fine_time_sync(bb, dt, 4)
+
+    sym_len = int(round(bb.sample_rate_in_hz * FT8_SYMBOL_LENGTH_IN_SEC))
+    start = int(round((dt + COSTAS_START_OFFSET_SEC) * bb.sample_rate_in_hz))
+    end = start + sym_len * FT8_SYMBOLS_PER_MESSAGE
+    trimmed = bb.samples[start:end]
+
+    return ComplexSamples(trimmed, bb.sample_rate_in_hz), dt, freq
+
+
+def soft_demod(samples_in: ComplexSamples) -> np.ndarray:
     """Return log-likelihood ratios for each payload bit.
 
-    Parameters
-    ----------
-    samples_in:
-        Complex baseband samples produced by
-        :func:`downsample_to_baseband`.
-    freq:
-        Base frequency in Hz returned by :func:`search.find_candidates`.
-    dt:
-        Start time offset from :func:`search.find_candidates`.
+    ``samples_in`` must contain exactly the 79 FT8 symbols beginning with the
+    first Costas sync symbol.  All residual frequency or time offsets should be
+    removed before calling this function.  :func:`fine_sync_candidate` performs
+    the required alignment steps.
     """
 
     samples = samples_in.samples
     sample_rate = samples_in.sample_rate_in_hz
     sym_len = int(round(sample_rate * FT8_SYMBOL_LENGTH_IN_SEC))
-    start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
+    start = 0
     time_idx = np.arange(sym_len) / sample_rate
     bases = np.exp(
-        -2j * np.pi * (freq + np.arange(8) * TONE_SPACING_IN_HZ)[:, None] * time_idx
+        -2j
+        * np.pi
+        * (0.0 + np.arange(8) * TONE_SPACING_IN_HZ)[:, None]
+        * time_idx
     )
 
     # Arrange the input samples into one matrix containing every symbol.  Each

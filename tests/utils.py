@@ -14,6 +14,8 @@ def generate_ft8_wav(
     workdir: Path,
     freq: int = 1500,
     snr: int = -10,
+    dt: float = 0.0,
+    fdop: float = 0.0,
 ) -> Path:
     """Run ft8sim to generate a WAV file containing ``message``."""
 
@@ -22,8 +24,8 @@ def generate_ft8_wav(
         "ft8sim",
         message,
         str(freq),
-        "0",
-        "0",
+        str(dt),
+        str(fdop),
         "0",
         "1",
         str(snr_for_ft8sim),
