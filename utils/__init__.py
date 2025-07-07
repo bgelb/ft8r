@@ -66,6 +66,18 @@ class RealSamples:
         self.samples = np.asarray(self.samples, dtype=float)
 
 
+@dataclass
+class ComplexSamples:
+    """Container for complex-valued samples and their sampling rate."""
+
+    samples: np.ndarray
+    sample_rate_in_hz: int
+
+    def __post_init__(self) -> None:
+        """Ensure that ``samples`` is a NumPy ``complex`` array."""
+        self.samples = np.asarray(self.samples, dtype=complex)
+
+
 def read_wav(path: str) -> RealSamples:
     """Load mono PCM WAV data and return a :class:`RealSamples` object."""
     with wave.open(path, "rb") as w:
@@ -87,6 +99,7 @@ def read_wav(path: str) -> RealSamples:
 
 __all__ = [
     "RealSamples",
+    "ComplexSamples",
     "read_wav",
     "COSTAS_SEQUENCE",
     "TONE_SPACING_IN_HZ",
