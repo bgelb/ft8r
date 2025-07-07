@@ -1,10 +1,10 @@
 import numpy as np
-from typing import List
 
 import ldpc
 
 from utils import (
     RealSamples,
+    ComplexSamples,
     TONE_SPACING_IN_HZ,
     COSTAS_START_OFFSET_SEC,
     FT8_SYMBOL_LENGTH_IN_SEC,
@@ -36,14 +36,80 @@ _LDPC_DECODER = ldpc.BpDecoder(
     LDPC_174_91_H, error_rate=0.1, input_vector_type="received_vector"
 )
 
+# Number of FT8 tone spacings carried in the downsampled slice (eight active
+# tones plus one spacing of transition band on either side)
+SLICE_SPAN_TONES = 10
+# Width of the narrow band extracted around each candidate (Hz)
+SLICE_BANDWIDTH_HZ = SLICE_SPAN_TONES * TONE_SPACING_IN_HZ
+# Number of seconds included in the FFTs used for downsampling
+FFT_DURATION_SEC = 16
+# Target sample rate for the downsampled baseband signal (Hz)
+BASEBAND_RATE_HZ = 200
+# Lengths of the forward and inverse FFTs
+_FFT_SLICE_LEN = int(BASEBAND_RATE_HZ * FFT_DURATION_SEC)
+_EDGE_TAPER_LEN = 101
+# Offset of the band edges relative to ``freq`` expressed in tone spacings.
+# ``freq`` corresponds to tone 0 so the bottom edge lies 1.5 tone spacings
+# below it and the top edge is ``SLICE_SPAN_TONES - 1.5`` spacings above.
+LOWER_EDGE_OFFSET_TONES = 1.5
+UPPER_EDGE_OFFSET_TONES = SLICE_SPAN_TONES - LOWER_EDGE_OFFSET_TONES
 
-def soft_demod(samples_in: RealSamples, freq: float, dt: float) -> np.ndarray:
+
+def downsample_to_baseband(samples_in: RealSamples, freq: float) -> ComplexSamples:
+    """Extract a narrow band around ``freq`` and decimate to ``BASEBAND_RATE_HZ``.
+
+    The returned audio contains ``SLICE_BANDWIDTH_HZ`` of spectrum centred on
+    ``freq`` and is shifted so that ``freq`` is at DC. The result is sampled at
+    :data:`BASEBAND_RATE_HZ`.
+    """
+
+    sample_rate = samples_in.sample_rate_in_hz
+    full_fft_len = int(sample_rate * FFT_DURATION_SEC)
+
+    audio = samples_in.samples
+    if len(audio) >= full_fft_len:
+        audio = audio[:full_fft_len]
+    else:
+        audio = np.pad(audio, (0, full_fft_len - len(audio)))
+
+    full_fft = np.fft.rfft(audio)
+
+    bin_spacing_hz = sample_rate / full_fft_len
+    symbol_rate_hz = TONE_SPACING_IN_HZ
+
+    bottom_freq = freq - LOWER_EDGE_OFFSET_TONES * symbol_rate_hz
+    top_freq = freq + UPPER_EDGE_OFFSET_TONES * symbol_rate_hz
+
+    start_bin = int(round(bottom_freq / bin_spacing_hz))
+    end_bin = int(round(top_freq / bin_spacing_hz))
+
+    slice_fft = np.zeros(_FFT_SLICE_LEN, dtype=complex)
+    slice_bins = full_fft[start_bin:end_bin]
+    slice_len = len(slice_bins)
+    slice_fft[:slice_len] = slice_bins
+
+    taper = 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, _EDGE_TAPER_LEN))
+    slice_fft[:_EDGE_TAPER_LEN] *= taper
+    slice_fft[slice_len - _EDGE_TAPER_LEN : slice_len] *= taper[::-1]
+
+    candidate_bin = int(round(freq / bin_spacing_hz))
+    bin_shift = candidate_bin - start_bin
+    slice_fft = np.roll(slice_fft, -bin_shift)
+
+    time_series = np.fft.ifft(slice_fft)
+    time_series *= 1 / np.sqrt(full_fft_len * _FFT_SLICE_LEN)
+
+    return ComplexSamples(time_series, sample_rate_in_hz=BASEBAND_RATE_HZ)
+
+
+def soft_demod(samples_in: ComplexSamples, freq: float, dt: float) -> np.ndarray:
     """Return log-likelihood ratios for each payload bit.
 
     Parameters
     ----------
     samples_in:
-        Input audio samples with sample rate.
+        Complex baseband samples produced by
+        :func:`downsample_to_baseband`.
     freq:
         Base frequency in Hz returned by :func:`search.find_candidates`.
     dt:
@@ -112,3 +178,4 @@ def ldpc_decode(llrs: np.ndarray) -> str:
     decoded = _LDPC_DECODER.decode(hard)
     bits = "".join("1" if b else "0" for b in decoded.astype(int))
     return bits
+
