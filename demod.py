@@ -104,23 +104,38 @@ def downsample_to_baseband(samples_in: RealSamples, freq: float) -> ComplexSampl
     return ComplexSamples(time_series, sample_rate_in_hz=BASEBAND_RATE_HZ)
 
 
+def _symbol_samples(sample_rate: float) -> int:
+    """Return the number of samples per FT8 symbol for ``sample_rate``."""
+    return int(round(sample_rate * FT8_SYMBOL_LENGTH_IN_SEC))
+
+
+def _tone_bases(sample_rate: float, sym_len: int, freq_offset_hz: float = 0.0) -> np.ndarray:
+    """Return a matrix of tone responses for one symbol."""
+    time_idx = np.arange(sym_len) / sample_rate
+    return np.exp(
+        -2j
+        * np.pi
+        * (freq_offset_hz + np.arange(8) * TONE_SPACING_IN_HZ)[:, None]
+        * time_idx
+    )
+
+
+def _symbol_matrix(samples: np.ndarray, start: int, sym_len: int) -> np.ndarray:
+    """Return ``samples`` sliced and reshaped into a symbol matrix."""
+    seg = samples[start : start + sym_len * FT8_SYMBOLS_PER_MESSAGE]
+    return seg.reshape(FT8_SYMBOLS_PER_MESSAGE, sym_len)
+
+
 def _costas_energy(
     samples: ComplexSamples, start: int, freq_offset_hz: float
 ) -> float:
     """Return the power in the Costas symbols at ``start`` with ``freq_offset_hz``."""
 
     sample_rate = samples.sample_rate_in_hz
-    sym_len = int(round(sample_rate * FT8_SYMBOL_LENGTH_IN_SEC))
-    seg = samples.samples[start : start + sym_len * FT8_SYMBOLS_PER_MESSAGE]
-    seg = seg.reshape(FT8_SYMBOLS_PER_MESSAGE, sym_len)
+    sym_len = _symbol_samples(sample_rate)
+    seg = _symbol_matrix(samples.samples, start, sym_len)
 
-    time_idx = np.arange(sym_len) / sample_rate
-    bases = np.exp(
-        -2j
-        * np.pi
-        * (freq_offset_hz + np.arange(8) * TONE_SPACING_IN_HZ)[:, None]
-        * time_idx
-    )
+    bases = _tone_bases(sample_rate, sym_len, freq_offset_hz)
 
     resp = np.abs(bases @ seg.T) ** 2
 
@@ -172,7 +187,7 @@ def fine_sync_candidate(
 
     dt = fine_time_sync(bb, dt, 4)
 
-    sym_len = int(round(bb.sample_rate_in_hz * FT8_SYMBOL_LENGTH_IN_SEC))
+    sym_len = _symbol_samples(bb.sample_rate_in_hz)
     start = int(round((dt + COSTAS_START_OFFSET_SEC) * bb.sample_rate_in_hz))
     end = start + sym_len * FT8_SYMBOLS_PER_MESSAGE
     trimmed = bb.samples[start:end]
@@ -191,22 +206,15 @@ def soft_demod(samples_in: ComplexSamples) -> np.ndarray:
 
     samples = samples_in.samples
     sample_rate = samples_in.sample_rate_in_hz
-    sym_len = int(round(sample_rate * FT8_SYMBOL_LENGTH_IN_SEC))
+    sym_len = _symbol_samples(sample_rate)
     start = 0
-    time_idx = np.arange(sym_len) / sample_rate
-    bases = np.exp(
-        -2j
-        * np.pi
-        * (0.0 + np.arange(8) * TONE_SPACING_IN_HZ)[:, None]
-        * time_idx
-    )
+    bases = _tone_bases(sample_rate, sym_len, 0.0)
 
     # Arrange the input samples into one matrix containing every symbol.  Each
     # row corresponds to one symbol worth of data.  This allows the tone
     # responses for all symbols to be computed in a single matrix
     # multiplication.
-    seg = samples[start : start + sym_len * FT8_SYMBOLS_PER_MESSAGE]
-    seg = seg.reshape(FT8_SYMBOLS_PER_MESSAGE, sym_len)
+    seg = _symbol_matrix(samples, start, sym_len)
 
     # ``resp`` has shape ``(8, FT8_SYMBOLS_PER_MESSAGE)`` and contains the
     # magnitude response of each tone for every symbol.
