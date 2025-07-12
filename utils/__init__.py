@@ -2,6 +2,8 @@ from dataclasses import dataclass
 import wave
 import numpy as np
 
+from .decode import decode77, register_callsign, ihashcall
+
 from .ldpc_matrix import LDPC_174_91_H
 
 # Order of tones forming the 7-symbol Costas sync sequence.  Each value
@@ -109,4 +111,7 @@ __all__ = [
     "calc_crc",
     "check_crc",
     "LDPC_174_91_H",
+    "decode77",
+    "register_callsign",
+    "ihashcall",
 ]
