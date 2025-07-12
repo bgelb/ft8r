@@ -1,6 +1,7 @@
 # Basic candidate search for FT8 Costas sequence
 import numpy as np
 from scipy.signal import correlate2d
+from scipy.ndimage import maximum_filter
 from typing import List, Tuple
 
 from utils import (
@@ -55,6 +56,93 @@ for sym_idx, bin_offset in enumerate(EXPANDED_COSTAS_SEQUENCE):
 # offsets are measured relative to the nominal start of the transmission.
 COSTAS_BLOCK_OFFSETS = [0, 36, 72]
 
+
+def candidate_score_map(
+    samples_in: RealSamples,
+    max_freq_bin: int,
+    max_dt_in_symbols: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the Costas power ratio scores for all search offsets."""
+
+    samples = samples_in.samples
+    sample_rate = samples_in.sample_rate_in_hz
+    sym_len = int(round(sample_rate / TONE_SPACING_IN_HZ))
+    fft_len = sym_len * FREQ_SEARCH_OVERSAMPLING_RATIO
+    step = sym_len // TIME_SEARCH_OVERSAMPLING_RATIO
+
+    offsets = [off * TIME_SEARCH_OVERSAMPLING_RATIO for off in COSTAS_BLOCK_OFFSETS]
+    max_offset = offsets[-1]
+
+    max_dt_idx = max_dt_in_symbols * TIME_SEARCH_OVERSAMPLING_RATIO
+    required_ffts = max_dt_idx + max_offset + _KERNEL_TIME_LEN
+    available_ffts = (len(samples) - sym_len) // step + 1
+    num_ffts = min(required_ffts, available_ffts)
+
+    segs = np.lib.stride_tricks.sliding_window_view(samples, sym_len)[::step]
+    segs = segs[:num_ffts]
+    segs = np.pad(segs, ((0, 0), (0, fft_len - sym_len)))
+    ffts = np.fft.rfft(segs, axis=1) / sym_len
+
+    fft_pwr = np.abs(ffts) ** 2
+
+    active_map = correlate2d(fft_pwr, _COSTAS_KERNEL, mode="valid")
+    noise_map = correlate2d(fft_pwr, _NOISE_KERNEL, mode="valid")
+    scores_map = active_map / (noise_map + 1e-12)
+
+    num_windows = scores_map.shape[0]
+    max_dt_idx = min(max_dt_idx, num_windows - 1)
+    max_base_bin = min(
+        max_freq_bin,
+        (scores_map.shape[1] - 1) // FREQ_SEARCH_OVERSAMPLING_RATIO,
+    )
+
+    idx = np.array(offsets)[:, None] + np.arange(max_dt_idx + 1)
+    valid = idx < num_windows
+    idx = np.clip(idx, 0, num_windows - 1)
+
+    active = active_map[idx] * valid[:, :, None]
+    noise = noise_map[idx] * valid[:, :, None]
+    active = active.sum(axis=0)
+    noise = noise.sum(axis=0)
+
+    num_blocks = valid.sum(axis=0)
+    scores = (active / (noise + 1e-12)) * num_blocks[:, None]
+
+    scores = scores[:, : (max_base_bin + 1) * FREQ_SEARCH_OVERSAMPLING_RATIO]
+    scores = scores[:, ::FREQ_SEARCH_OVERSAMPLING_RATIO]
+
+    dts = (
+        np.arange(max_dt_idx + 1) * step / sample_rate - COSTAS_START_OFFSET_SEC
+    )
+    freqs = np.arange(max_base_bin + 1) * TONE_SPACING_IN_HZ
+
+    return scores, dts, freqs
+
+
+def peak_candidates(
+    scores: np.ndarray,
+    dts: np.ndarray,
+    freqs: np.ndarray,
+    threshold: float,
+) -> List[Tuple[float, float, float]]:
+    """Return local maxima from ``scores`` above ``threshold``."""
+
+    # Max value including the center.
+    neighborhood = np.ones((3, 3), dtype=bool)
+    max_full = maximum_filter(scores, footprint=neighborhood, mode="constant", cval=-np.inf)
+    # Max value of neighbors excluding the center element.
+    neighbor_foot = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=bool)
+    max_neighbors = maximum_filter(scores, footprint=neighbor_foot, mode="constant", cval=-np.inf)
+
+    mask = (scores >= threshold) & (scores == max_full) & (scores > max_neighbors)
+    dt_idx, freq_idx = np.nonzero(mask)
+    results = [
+        (float(scores[i, j]), float(dts[i]), float(freqs[j]))
+        for i, j in zip(dt_idx, freq_idx)
+    ]
+    results.sort(reverse=True)
+    return results
+
 def find_candidates(
     samples_in: RealSamples,
     max_freq_bin: int,
@@ -62,6 +150,9 @@ def find_candidates(
     threshold: float,
 ) -> List[Tuple[float, float, float]]:
     """Search ``samples_in`` for possible Costas sync locations.
+
+    Candidates correspond to local maxima in the Costas power ratio map above
+    ``threshold``.
 
     Parameters
     ----------
@@ -89,75 +180,10 @@ def find_candidates(
     each candidate is adjusted by ``COSTAS_START_OFFSET_SEC`` so it lines up
     with the timestamp reported by WSJT-X.
     """
-    samples = samples_in.samples
-    sample_rate = samples_in.sample_rate_in_hz
-    sym_len = int(round(sample_rate / TONE_SPACING_IN_HZ))
-    fft_len = sym_len * FREQ_SEARCH_OVERSAMPLING_RATIO
-    step = sym_len // TIME_SEARCH_OVERSAMPLING_RATIO
-
-    offsets = [off * TIME_SEARCH_OVERSAMPLING_RATIO for off in COSTAS_BLOCK_OFFSETS]
-    max_offset = offsets[-1]
-
-    max_dt_idx = max_dt_in_symbols * TIME_SEARCH_OVERSAMPLING_RATIO
-    required_ffts = max_dt_idx + max_offset + _KERNEL_TIME_LEN
-    available_ffts = (len(samples) - sym_len) // step + 1
-    num_ffts = min(required_ffts, available_ffts)
-
-    # Build a matrix of overlapping windows so all FFTs can be computed in one
-    # vectorized operation. ``sliding_window_view`` creates ``sym_len`` sample
-    # segments spaced ``step`` samples apart without copying the underlying
-    # data.
-    segs = np.lib.stride_tricks.sliding_window_view(samples, sym_len)[::step]
-    segs = segs[:num_ffts]
-    segs = np.pad(segs, ((0, 0), (0, fft_len - sym_len)))
-    ffts = np.fft.rfft(segs, axis=1) / sym_len
-
-    fft_pwr = np.abs(ffts) ** 2
-
-    active_map = correlate2d(fft_pwr, _COSTAS_KERNEL, mode="valid")
-    noise_map = correlate2d(fft_pwr, _NOISE_KERNEL, mode="valid")
-    scores_map = active_map / (noise_map + 1e-12)
-
-    num_windows = scores_map.shape[0]
-    max_dt_idx = min(max_dt_idx, num_windows - 1)
-    max_base_bin = min(
+    scores, dts, freqs = candidate_score_map(
+        samples_in,
         max_freq_bin,
-        (scores_map.shape[1] - 1) // FREQ_SEARCH_OVERSAMPLING_RATIO,
+        max_dt_in_symbols,
     )
 
-    # Gather all offsets for the three Costas blocks at once. ``idx`` has shape
-    # ``(3, max_dt_idx + 1)`` where each row corresponds to one Costas block
-    # offset.  Rows that would fall past the end of ``active_map`` are clipped
-    # and later ignored using ``valid``.
-    idx = np.array(offsets)[:, None] + np.arange(max_dt_idx + 1)
-    valid = idx < num_windows
-    idx = np.clip(idx, 0, num_windows - 1)
-
-    active = active_map[idx] * valid[:, :, None]
-    noise = noise_map[idx] * valid[:, :, None]
-    active = active.sum(axis=0)
-    noise = noise.sum(axis=0)
-
-    # ``num_blocks`` records how many Costas blocks contributed at each time
-    # offset (1 to 3).
-    num_blocks = valid.sum(axis=0)
-    scores = (active / (noise + 1e-12)) * num_blocks[:, None]
-
-    # Only evaluate base frequencies aligned to actual FT8 tones.
-    scores = scores[:, : (max_base_bin + 1) * FREQ_SEARCH_OVERSAMPLING_RATIO + 1]
-    scores = scores[:, ::FREQ_SEARCH_OVERSAMPLING_RATIO]
-
-    dts = (
-        np.arange(max_dt_idx + 1) * step / sample_rate - COSTAS_START_OFFSET_SEC
-    )
-    freqs = np.arange(max_base_bin + 1) * TONE_SPACING_IN_HZ
-
-    mask = scores >= threshold
-    dt_idx, freq_idx = np.nonzero(mask)
-    results = [
-        (float(scores[i, j]), float(dts[i]), float(freqs[j]))
-        for i, j in zip(dt_idx, freq_idx)
-    ]
-
-    results.sort(reverse=True)
-    return results
+    return peak_candidates(scores, dts, freqs, threshold)

@@ -1,4 +1,5 @@
-from search import find_candidates
+from search import find_candidates, candidate_score_map, peak_candidates
+import numpy as np
 from utils import (
     read_wav,
     RealSamples,
@@ -86,3 +87,32 @@ def test_naive_demod_low_snr(tmp_path):
     mismatches = sum(a != b for a, b in zip(decoded_bits, expected_bits))
     assert mismatches > 0
     assert not check_crc(decoded_bits)
+
+
+def test_candidate_peak_filter(tmp_path):
+    msg = "K1ABC W9XYZ EN37"
+    wav = generate_ft8_wav(msg, tmp_path, snr=10)
+    audio = read_wav(str(wav))
+    max_freq_bin, max_dt_symbols = default_search_params(audio.sample_rate_in_hz)
+
+    scores, dts, freqs = candidate_score_map(audio, max_freq_bin, max_dt_symbols)
+    thresh = DEFAULT_SEARCH_THRESHOLD
+
+    # Several cells should exceed ``thresh`` and the filtering step should
+    # reduce the count of candidates.
+    num_above = np.count_nonzero(scores >= thresh)
+    assert num_above > 1
+
+    peaks = peak_candidates(scores, dts, freqs, threshold=thresh)
+
+    assert 0 < len(peaks) < num_above
+    score, dt, freq = peaks[0]
+    assert abs(freq - 1500) < DEFAULT_FREQ_EPS
+    assert abs(dt - 0.0) < DEFAULT_DT_EPS
+    assert score > DEFAULT_SEARCH_THRESHOLD
+
+    # ``find_candidates`` should yield the same result via ``peak_candidates``
+    via_api = find_candidates(
+        audio, max_freq_bin, max_dt_symbols, threshold=thresh
+    )
+    assert via_api == peaks
