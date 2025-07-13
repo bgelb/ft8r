@@ -1,7 +1,7 @@
 import numpy as np
 
 import ldpc
-from typing import Tuple
+from typing import Tuple, List, Dict
 
 from utils import (
     RealSamples,
@@ -12,7 +12,11 @@ from utils import (
     FT8_SYMBOL_LENGTH_IN_SEC,
     FT8_SYMBOLS_PER_MESSAGE,
     LDPC_174_91_H,
+    check_crc,
+    decode77,
 )
+
+from search import find_candidates
 
 # Symbol positions occupied by the three 7-symbol Costas sequences.
 COSTAS_POSITIONS = list(range(7)) + list(range(36, 43)) + list(range(72, 79))
@@ -262,4 +266,65 @@ def ldpc_decode(llrs: np.ndarray) -> str:
     decoded = _LDPC_DECODER.decode(hard)
     bits = "".join("1" if b else "0" for b in decoded.astype(int))
     return bits
+
+
+def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
+    """Decode all FT8 signals present in ``samples_in``.
+
+    The audio is searched for Costas sync peaks and every candidate above
+    ``threshold`` is downsampled, synchronized and decoded.  Only candidates
+    that pass the CRC check are returned.
+
+    Parameters
+    ----------
+    samples_in:
+        Audio samples for one 15 second FT8 cycle.
+    threshold:
+        Minimum Costas power ratio for a location to be considered.
+
+    Returns
+    -------
+    List[Dict[str, float | str]]
+        Each dictionary contains ``message`` (the decoded text), ``score``,
+        ``freq`` and ``dt`` for one valid decode.
+    """
+
+    sample_rate = samples_in.sample_rate_in_hz
+
+    # Compute search parameters matching those used in the test helpers.
+    sym_len = int(sample_rate / TONE_SPACING_IN_HZ)
+    max_freq_bin = int(2500 / TONE_SPACING_IN_HZ)
+    # Search the entire audio span for possible start offsets.
+    max_dt_samples = len(samples_in.samples) - int(sample_rate * COSTAS_START_OFFSET_SEC)
+    max_dt_symbols = -(-max_dt_samples // sym_len)
+
+    candidates = find_candidates(
+        samples_in, max_freq_bin, max_dt_symbols, threshold=threshold
+    )
+
+    results = []
+    for score, dt, freq in candidates:
+        start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
+        end = start + sym_len * FT8_SYMBOLS_PER_MESSAGE
+        margin = int(round(10 * sample_rate / BASEBAND_RATE_HZ))
+        if start - margin < 0 or end + margin > len(samples_in.samples):
+            continue
+        try:
+            bb, dt_f, freq_f = fine_sync_candidate(samples_in, freq, dt)
+        except ValueError:
+            continue
+        llrs = soft_demod(bb)
+        decoded_bits = ldpc_decode(llrs)
+        try:
+            text = decode77(decoded_bits[:77])
+        except Exception:
+            continue
+        results.append({
+            "message": text,
+            "score": score,
+            "freq": freq_f,
+            "dt": dt_f,
+        })
+
+    return results
 
