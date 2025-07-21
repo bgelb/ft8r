@@ -96,7 +96,7 @@ def _unpack28(n: int) -> str:
     return ""
 
 
-def decode77(bitstring: str) -> str:
+def _decode77_raw(bitstring: str) -> str:
     """Decode a 77-bit FT8 message to text."""
     if len(bitstring) != 77:
         raise ValueError("bitstring must have length 77")
@@ -263,4 +263,9 @@ def decode77(bitstring: str) -> str:
         return f"{call1} {call2}{suffix}".strip()
 
     raise ValueError("Unsupported message type")
+
+
+def decode77(bitstring: str) -> str:
+    """Decode a 77-bit FT8 message with underscores converted to spaces."""
+    return _decode77_raw(bitstring).replace("_", " ")
 
