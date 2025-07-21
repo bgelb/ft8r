@@ -11,5 +11,5 @@ pytest -q
 ```
 
 The test uses `ft8sim` to create a `.wav` file and decodes it with `jt9`.
-It verifies that the decoded message and reported SNR, frequency and
+It verifies that the decoded message along with the reported frequency and
 time offset closely match the values used to generate the sample.
