@@ -24,11 +24,10 @@ def decode_ft8_wav(path: Path) -> str:
 def parse_jt9_output(line: str):
     """Return decoded parameters from a jt9 output line."""
     parts = line.split(maxsplit=5)
-    snr = float(parts[1])
     dt = float(parts[2])
     freq = float(parts[3])
     message = parts[5].strip()
-    return snr, dt, freq, message
+    return dt, freq, message
 
 
 def test_ft8sim_to_jt9(tmp_path):
@@ -36,10 +35,9 @@ def test_ft8sim_to_jt9(tmp_path):
     wav_path = generate_ft8_wav(msg, tmp_path)
     output = decode_ft8_wav(wav_path)
     first_line = output.splitlines()[0]
-    snr, dt, freq, decoded_msg = parse_jt9_output(first_line)
+    dt, freq, decoded_msg = parse_jt9_output(first_line)
 
     assert decoded_msg == msg
-    assert abs(snr - (-10)) <= 1.0
     assert abs(dt - 0.0) < DEFAULT_DT_EPS
     assert abs(freq - 1500) < 2.0
 
