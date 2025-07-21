@@ -194,7 +194,9 @@ def decode77(bitstring: str) -> str:
             isnr = irpt - 35
             if isnr > 50:
                 isnr -= 101
-            crpt = f"{isnr:+03d}".replace("+0", "+").replace("-0", "-")
+            # Preserve leading zeros so reports like ``-05`` are formatted in
+            # a predictable way that matches WSJT-X output.
+            crpt = f"{isnr:+03d}"
             if ir:
                 return f"{call1} {call2} R{crpt}"
             else:

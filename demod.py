@@ -293,7 +293,11 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
 
     # Compute search parameters matching those used in the test helpers.
     sym_len = int(sample_rate / TONE_SPACING_IN_HZ)
-    max_freq_bin = int(2500 / TONE_SPACING_IN_HZ)
+    # Extend the search range slightly above the 2.5 kHz used in earlier
+    # versions so signals up to 3 kHz offset are considered.  Some of the
+    # bundled sample WAVs contain transmissions above 2.5 kHz which were
+    # previously ignored.
+    max_freq_bin = int(3000 / TONE_SPACING_IN_HZ)
     # Search the entire audio span for possible start offsets.
     max_dt_samples = len(samples_in.samples) - int(sample_rate * COSTAS_START_OFFSET_SEC)
     max_dt_symbols = -(-max_dt_samples // sym_len)
