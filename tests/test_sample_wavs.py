@@ -14,13 +14,13 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "ft8_lib-2.0" / "test" / "wa
 # listed transmissions we currently expect to miss.  Additional decodes not
 # present in the ``.txt`` file are ignored by the assertions below.
 SAMPLES = {
-    "191111_110115": (0, 1),
+    "191111_110115": (1, 0),
     "191111_110130": (4, 1),
-    "191111_110145": (0, 1),
+    "191111_110145": (1, 0),
     "191111_110200": (3, 2),
     "191111_110215": (2, 1),
     "191111_110615": (15, 6),
-    "191111_110630": (8, 6),
+    "191111_110630": (10, 4),
     "191111_110645": (15, 4),
     "191111_110700": (12, 3),
 }
