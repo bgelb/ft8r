@@ -263,6 +263,17 @@ def ldpc_decode(llrs: np.ndarray) -> str:
     """
 
     hard = (llrs > 0).astype(np.uint8)
+    # Convert log-likelihood ratios to bit error probabilities.  ``update_channel_probs``
+    # expects the probability of each received bit being flipped.  ``llrs`` encode the
+    # log of ``p(1) / p(0)`` so ``1 / (1 + exp(abs(llr)))`` is the probability that the
+    # hard decision is wrong.
+    # Scaling the LLR magnitude reduces the effective bit error probability
+    # which helps the belief propagation decoder converge on weak signals.
+    # The factor 7.0 mirrors the reliability scaling used by WSJT-X.  It was
+    # tuned empirically by trying a range of values and selecting the one that
+    # best matched WSJT-X's decode rate on the sample set.
+    error_prob = 1.0 / (np.exp(7.0 * np.abs(llrs)) + 1.0)
+    _LDPC_DECODER.update_channel_probs(error_prob)
     decoded = _LDPC_DECODER.decode(hard)
     bits = "".join("1" if b else "0" for b in decoded.astype(int))
     return bits
