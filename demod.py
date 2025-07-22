@@ -38,8 +38,12 @@ GRAY_MAP = [
 # (see ``utils/ldpc_matrix.py``).  Embedding it here avoids relying on the
 # WSJT-X archive at runtime.
 
-_LDPC_DECODER = ldpc.BpDecoder(
-    LDPC_174_91_H, error_rate=0.1, input_vector_type="received_vector"
+_LDPC_DECODER = ldpc.BpOsdDecoder(
+    LDPC_174_91_H,
+    error_rate=0.1,
+    input_vector_type="received_vector",
+    osd_method="OSD_CS",
+    osd_order=2,
 )
 
 # Number of FT8 tone spacings carried in the downsampled slice (eight active
@@ -274,8 +278,12 @@ def ldpc_decode(llrs: np.ndarray) -> str:
     # best matched WSJT-X's decode rate on the sample set.
     error_prob = 1.0 / (np.exp(7.0 * np.abs(llrs)) + 1.0)
     _LDPC_DECODER.update_channel_probs(error_prob)
-    decoded = _LDPC_DECODER.decode(hard)
-    bits = "".join("1" if b else "0" for b in decoded.astype(int))
+
+    syndrome = (LDPC_174_91_H @ hard) % 2
+    syndrome = syndrome.astype(np.uint8)
+    err_est = _LDPC_DECODER.decode(syndrome)
+    corrected = np.bitwise_xor(err_est.astype(np.uint8), hard)
+    bits = "".join("1" if b else "0" for b in corrected.astype(int))
     return bits
 
 
