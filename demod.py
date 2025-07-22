@@ -188,7 +188,11 @@ def fine_sync_candidate(
     bb = downsample_to_baseband(samples_in, freq)
 
     dt = fine_time_sync(bb, dt, 10)
-    df = fine_freq_sync(bb, dt, 2.5, 0.5)
+    # ``find_candidates`` only locates frequencies to the nearest FT8 tone
+    # spacing (6.25 Hz).  Some of the test samples include signals that fall
+    # roughly halfway between these coarse bins.  Increase the fine frequency
+    # search span and resolution so such offsets can be recovered.
+    df = fine_freq_sync(bb, dt, 5.0, 0.25)
     freq += df
 
     bb = downsample_to_baseband(samples_in, freq)
