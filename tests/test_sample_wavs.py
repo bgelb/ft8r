@@ -13,7 +13,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "ft8_lib-2.0" / "test" / "wa
 # should be found by the decoder while ``not_decoded`` indicates how many
 # listed transmissions we currently expect to miss.  Additional decodes not
 # present in the ``.txt`` file are ignored by the assertions below.
-SAMPLES = {
+SAMPLES_SINGLE = {
     "191111_110115": (0, 1),
     "191111_110130": (4, 1),
     "191111_110145": (0, 1),
@@ -24,6 +24,10 @@ SAMPLES = {
     "191111_110645": (15, 4),
     "191111_110700": (12, 3),
 }
+
+# The multi-pass decoder currently recovers the same set of decodes for these
+# samples but is kept separate for future comparisons.
+SAMPLES_MULTI = SAMPLES_SINGLE.copy()
 
 
 def parse_expected(path: Path):
@@ -65,14 +69,30 @@ def idfn(param):
 import pytest
 
 
-@pytest.mark.parametrize("stem,expected", SAMPLES.items(), ids=idfn)
-def test_decode_sample_wavs(stem, expected):
+@pytest.mark.parametrize("stem,expected", SAMPLES_SINGLE.items(), ids=idfn)
+def test_decode_sample_wavs_single_pass(stem, expected):
     expected_success, expected_fail = expected
     wav_path = DATA_DIR / f"{stem}.wav"
     txt_path = DATA_DIR / f"{stem}.txt"
 
     audio = read_wav(str(wav_path))
-    results = decode_full_period(audio)
+    results = decode_full_period(audio, max_passes=1)
+
+    expected_records = parse_expected(txt_path)
+    matched = check_decodes(results, expected_records)
+
+    assert matched == expected_success
+    assert len(expected_records) - matched == expected_fail
+
+
+@pytest.mark.parametrize("stem,expected", SAMPLES_MULTI.items(), ids=idfn)
+def test_decode_sample_wavs_multi_pass(stem, expected):
+    expected_success, expected_fail = expected
+    wav_path = DATA_DIR / f"{stem}.wav"
+    txt_path = DATA_DIR / f"{stem}.txt"
+
+    audio = read_wav(str(wav_path))
+    results = decode_full_period(audio, max_passes=3)
 
     expected_records = parse_expected(txt_path)
     matched = check_decodes(results, expected_records)

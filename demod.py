@@ -15,6 +15,7 @@ from utils import (
     check_crc,
     decode77,
 )
+from utils.waveform import bits_to_tones, synth_waveform
 
 from search import find_candidates
 
@@ -279,8 +280,8 @@ def ldpc_decode(llrs: np.ndarray) -> str:
     return bits
 
 
-def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
-    """Decode all FT8 signals present in ``samples_in``.
+def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, max_passes: int = 3):
+    """Decode all FT8 signals present in ``samples_in`` using multi-pass subtraction.
 
     The audio is searched for Costas sync peaks and every candidate above
     ``threshold`` is downsampled, synchronized and decoded.  Only candidates
@@ -313,33 +314,74 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
     max_dt_samples = len(samples_in.samples) - int(sample_rate * COSTAS_START_OFFSET_SEC)
     max_dt_symbols = -(-max_dt_samples // sym_len)
 
-    candidates = find_candidates(
-        samples_in, max_freq_bin, max_dt_symbols, threshold=threshold
-    )
-
+    working = samples_in.samples.copy()
     results = []
-    for score, dt, freq in candidates:
-        start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
-        end = start + sym_len * FT8_SYMBOLS_PER_MESSAGE
-        margin = int(round(10 * sample_rate / BASEBAND_RATE_HZ))
-        if start - margin < 0 or end + margin > len(samples_in.samples):
-            continue
-        try:
-            bb, dt_f, freq_f = fine_sync_candidate(samples_in, freq, dt)
-        except ValueError:
-            continue
-        llrs = soft_demod(bb)
-        decoded_bits = ldpc_decode(llrs)
-        try:
-            text = decode77(decoded_bits[:77])
-        except Exception:
-            continue
-        results.append({
-            "message": text,
-            "score": score,
-            "freq": freq_f,
-            "dt": dt_f,
-        })
+
+    def seen_before(msg: str, dt_v: float, freq_v: float) -> bool:
+        for rec in results:
+            if (
+                rec["message"] == msg
+                and abs(rec["dt"] - dt_v) < 0.2
+                and abs(rec["freq"] - freq_v) < 1.0
+            ):
+                return True
+        return False
+
+    for _ in range(max_passes):
+        audio = RealSamples(working, sample_rate)
+        candidates = find_candidates(
+            audio, max_freq_bin, max_dt_symbols, threshold=threshold
+        )
+
+        decoded_in_pass = []
+        found = False
+        for score, dt, freq in candidates:
+            start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
+            end = start + sym_len * FT8_SYMBOLS_PER_MESSAGE
+            margin = int(round(10 * sample_rate / BASEBAND_RATE_HZ))
+            if start - margin < 0 or end + margin > len(working):
+                continue
+            try:
+                bb, dt_f, freq_f = fine_sync_candidate(audio, freq, dt)
+            except ValueError:
+                continue
+            llrs = soft_demod(bb)
+            decoded_bits = ldpc_decode(llrs)
+            try:
+                text = decode77(decoded_bits[:77])
+            except Exception:
+                continue
+            if seen_before(text, dt_f, freq_f):
+                continue
+
+            results.append(
+                {
+                    "message": text,
+                    "score": score,
+                    "freq": freq_f,
+                    "dt": dt_f,
+                }
+            )
+
+            amp = float(np.sqrt(np.mean(np.abs(bb.samples) ** 2)))
+            decoded_in_pass.append((decoded_bits, dt_f, freq_f, amp))
+            found = True
+
+        if not found:
+            break
+
+        # Subtract all signals decoded in this pass
+        for bits, dt_f, freq_f, amp in decoded_in_pass:
+            tones = bits_to_tones(bits)
+            synth = synth_waveform(
+                tones,
+                sample_rate,
+                freq_f,
+                dt_f,
+                amplitude=amp,
+                total_len=len(working),
+            )
+            working[: len(synth)] -= synth
 
     return results
 
