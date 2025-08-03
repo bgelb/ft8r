@@ -181,23 +181,34 @@ def fine_freq_sync(
 
 
 def fine_sync_candidate(
-    samples_in: RealSamples, freq: float, dt: float
+    samples_in: RealSamples, freq: float, dt: float, iterations: int = 3
 ) -> Tuple[ComplexSamples, float, float]:
-    """Return finely aligned baseband, ``dt`` and ``freq`` for ``samples_in``."""
+    """Return finely aligned baseband, ``dt`` and ``freq`` for ``samples_in``.
+
+    The search for the optimal time and frequency offsets is performed in a
+    coarse-to-fine loop.  The initial search span and resolution match the
+    previous implementation.  Each iteration refines the result by centring the
+    next search around the current best offsets while reducing the step size by
+    half.  This increases the resolution of the search and can recover signals
+    that fall between the coarse bins.
+    """
 
     bb = downsample_to_baseband(samples_in, freq)
 
-    dt = fine_time_sync(bb, dt, 10)
-    # ``find_candidates`` only locates frequencies to the nearest FT8 tone
-    # spacing (6.25 Hz).  Some of the test samples include signals that fall
-    # roughly halfway between these coarse bins.  Increase the fine frequency
-    # search span and resolution so such offsets can be recovered.
-    df = fine_freq_sync(bb, dt, 5.0, 0.25)
-    freq += df
+    time_search = 10
+    freq_search = 5.0
+    freq_step = 0.25
 
-    bb = downsample_to_baseband(samples_in, freq)
+    for _ in range(iterations):
+        dt = fine_time_sync(bb, dt, int(round(time_search)))
+        df = fine_freq_sync(bb, dt, freq_search, freq_step)
+        freq += df
 
-    dt = fine_time_sync(bb, dt, 4)
+        bb = downsample_to_baseband(samples_in, freq)
+
+        time_search = max(1.0, time_search / 2.0)
+        freq_search = freq_step
+        freq_step /= 2.0
 
     sym_len = _symbol_samples(bb.sample_rate_in_hz)
     start = int(round((dt + COSTAS_START_OFFSET_SEC) * bb.sample_rate_in_hz))
