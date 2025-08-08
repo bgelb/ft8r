@@ -1,5 +1,8 @@
 from pathlib import Path
 import subprocess
+import os
+import shutil
+import pytest
 
 DEFAULT_SEARCH_THRESHOLD = 1.0
 
@@ -7,6 +10,46 @@ DEFAULT_SEARCH_THRESHOLD = 1.0
 DEFAULT_FREQ_EPS = 1.0
 # Epsilon for validating decoded time offset in tests (s)
 DEFAULT_DT_EPS = 0.2
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _default_wsjtx_dirs() -> list[Path]:
+    root = _repo_root()
+    return [
+        root / ".wsjtx" / "bin",
+        root / ".wsjtx" / "WSJT-X.app" / "Contents" / "MacOS",
+        # Extracted Debian package layout
+        root / ".wsjtx" / "linux-pkg" / "usr" / "bin",
+    ]
+
+
+def resolve_wsjt_binary(name: str) -> str | None:
+    """Return absolute path to a WSJT-X CLI binary or ``None`` if not found.
+
+    Lookup order:
+    - ``WSJTX_BIN_DIR`` env var (if set)
+    - repo-local default locations populated by setup script
+    - system PATH via ``shutil.which``
+    """
+    # Env override
+    env_dir = os.environ.get("WSJTX_BIN_DIR")
+    if env_dir:
+        candidate = Path(env_dir) / name
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    # Local defaults
+    for d in _default_wsjtx_dirs():
+        candidate = d / name
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    # PATH fallback
+    found = shutil.which(name)
+    return found
 
 
 def generate_ft8_wav(
@@ -18,10 +61,12 @@ def generate_ft8_wav(
     fdop: float = 0.0,
 ) -> Path:
     """Run ft8sim to generate a WAV file containing ``message``."""
-
+    ft8sim_path = resolve_wsjt_binary("ft8sim")
+    if not ft8sim_path:
+        pytest.skip("ft8sim not available; skipping test that requires it")
     snr_for_ft8sim = snr
     cmd = [
-        "ft8sim",
+        ft8sim_path,
         message,
         str(freq),
         str(dt),
@@ -36,9 +81,12 @@ def generate_ft8_wav(
 
 def ft8code_bits(message: str) -> str:
     """Return the 174-bit FT8 payload for ``message`` using ``ft8code``."""
-    result = subprocess.run(
-        ["ft8code", message], check=True, stdout=subprocess.PIPE, text=True
-    )
+    ft8code_path = resolve_wsjt_binary("ft8code")
+    if not ft8code_path:
+        raise RuntimeError(
+            "ft8code not found. Please run scripts/setup_env.sh or set WSJTX_BIN_DIR"
+        )
+    result = subprocess.run([ft8code_path, message], check=True, stdout=subprocess.PIPE, text=True)
     bits = []
     grab = False
     for line in result.stdout.splitlines():

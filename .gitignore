@@ -1,3 +1,8 @@
+.venv/
+.wsjtx/
+scripts/*.log
+__pycache__/
+*.pyc
 __pycache__/
 wsjtx-2.7.0/
 wsjtx-2.7.0.tgz
