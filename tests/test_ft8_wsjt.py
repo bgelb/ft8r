@@ -5,12 +5,18 @@ from tests.utils import (
     generate_ft8_wav,
     DEFAULT_FREQ_EPS,
     DEFAULT_DT_EPS,
+    resolve_wsjt_binary,
 )
 
 
 def decode_ft8_wav(path: Path) -> str:
     """Decode the wav file using jt9 in FT8 mode and return stdout."""
-    cmd = ["jt9", "--ft8", str(path)]
+    jt9_path = resolve_wsjt_binary("jt9")
+    if not jt9_path:
+        raise AssertionError(
+            "jt9 not found. Please run scripts/setup_env.sh or set WSJTX_BIN_DIR"
+        )
+    cmd = [jt9_path, "--ft8", str(path)]
     result = subprocess.run(
         cmd,
         check=True,
