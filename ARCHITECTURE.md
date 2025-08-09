@@ -75,6 +75,57 @@ LLRs are converted into per‑bit error probabilities (with reliability scaling)
 
 Calls the candidate search, applies both fine synchronization methods, demodulates, LDPC‑decodes, and text‑decodes each valid message. Each successful decode returns a dictionary with `message`, `score`, `freq`, and `dt`.
 
+### Performance tuning and profiling
+
+This project aims to decode a 15s FT8 cycle in roughly O(1s) wall time on a modern CPU. We added a combination of algorithmic optimizations, instrumentation, and environment‑tunable knobs to balance speed and robustness.
+
+#### Instrumentation
+
+- `utils/prof.PROFILER` provides low‑overhead section timing when enabled via `FT8R_PROFILE=1`.
+- A profiling helper `scripts/profile_decode.py` measures wall time, optionally runs `cProfile`, and can export section timing JSON.
+- An opt‑in performance test `tests/test_performance.py` is available when `FT8R_PERF=1`.
+
+Suggested usage:
+
+```
+PYTHONPATH=. FT8R_PROFILE=1 python scripts/profile_decode.py websdr_test6 --json profile.json
+```
+
+#### Implementation optimizations
+
+- Cache the 16s full‑period FFT once per decode and reuse for baseband slicing.
+- Precompute the fixed edge taper window for FFT slices.
+- Cache zero‑offset tone bases per `(sample_rate, sym_len)` and apply per‑frequency phase shifts for fine frequency sync.
+- Attempt both refined and legacy alignment paths (see below). A fast CRC short‑circuit on hard decisions avoids expensive LDPC when possible.
+
+All changes preserve numerical results; any behavior differences can be gated via environment variables described next.
+
+#### Tuning knobs (environment variables)
+
+- `FT8R_MAX_CANDIDATES` (default: `1500`; `0` disables capping)
+  - Controls how many top candidates (time/frequency peaks) are fully processed. Trade‑off: fewer candidates reduce total alignment/LDPC work (faster), but could miss marginal signals. Default chosen with headroom: across bundled samples, candidate counts are approximately p95≈1172, p99≈1244, max≈1260; we set 1500 to exceed the observed maximum.
+
+- `FT8R_DISABLE_LEGACY` (default: `0`)
+  - When `1`, skips the legacy (integer‑grid) alignment path. Trade‑off: less robust on some marginal signals but faster. Keep off for maximum coverage; enable for lower latency scenarios.
+
+- `FT8R_RUN_BOTH` (default: `1`)
+  - When `1`, runs both refined and legacy alignment for each candidate (original behavior). When `0`, run legacy only if refined fails to decode. Trade‑off: running both increases chances that at least one alignment decodes the signal at the cost of extra compute. The default favors robustness.
+
+- `FT8R_MIN_LLR_AVG` (default: `0.0` = disabled)
+  - If set to a positive float, performs an early reject when average |LLR| for a candidate is below this threshold, skipping LDPC. Trade‑off: can significantly reduce LDPC workload but risks dropping very weak decodes if set too high. Recommended only for latency‑critical deployments after tuning on your signal set.
+
+Additional flags used in CI/testing:
+
+- `FT8R_PERF`, `FT8R_PERF_STEM`, `FT8R_PERF_REPEATS`, `FT8R_TARGET_S`, `FT8R_PERF_ALLOW_FAIL` control the opt‑in performance test.
+
+#### How defaults were evaluated
+
+- We measured candidate counts across all bundled `ft8_lib-2.0` samples using `scripts/evaluate_candidate_caps.py` and saved results in `candidate_cap_eval.json`.
+  - Distribution: p95≈1172, p99≈1244, max≈1260.
+  - Default cap set to 1500 to exceed p99 and the observed max, providing headroom for unseen inputs while bounding worst‑case runtime.
+- We profiled with `scripts/profile_decode.py` and found runtime dominated by LDPC and candidate search correlation on busy samples; the implemented caching and reuse reduced overhead meaningfully.
+- Robustness: we preserved the original behavior of running both refined and legacy alignment by default (`FT8R_RUN_BOTH=1`) to avoid decode regressions while still allowing speed‑oriented configurations.
+
 ### Design choices
 
 - **Parabolic vs. linear or higher‑order fits**:

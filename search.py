@@ -10,6 +10,7 @@ from utils import (
     TONE_SPACING_IN_HZ,
     COSTAS_START_OFFSET_SEC,
 )
+from utils.prof import PROFILER
 
 # Number of FFT bins used per symbol bin. This controls the zero-padding
 # applied to each symbol prior to the FFT and therefore the frequency
@@ -78,16 +79,21 @@ def candidate_score_map(
     available_ffts = (len(samples) - sym_len) // step + 1
     num_ffts = min(required_ffts, available_ffts)
 
-    segs = np.lib.stride_tricks.sliding_window_view(samples, sym_len)[::step]
-    segs = segs[:num_ffts]
-    segs = np.pad(segs, ((0, 0), (0, fft_len - sym_len)))
-    ffts = np.fft.rfft(segs, axis=1) / sym_len
+    with PROFILER.section("search.sliding_windows"):
+        segs = np.lib.stride_tricks.sliding_window_view(samples, sym_len)[::step]
+        segs = segs[:num_ffts]
+        segs = np.pad(segs, ((0, 0), (0, fft_len - sym_len)))
+    with PROFILER.section("search.rfft_grid"):
+        ffts = np.fft.rfft(segs, axis=1) / sym_len
 
-    fft_pwr = np.abs(ffts) ** 2
+    with PROFILER.section("search.fft_power"):
+        fft_pwr = np.abs(ffts) ** 2
 
-    active_map = correlate2d(fft_pwr, _COSTAS_KERNEL, mode="valid")
-    noise_map = correlate2d(fft_pwr, _NOISE_KERNEL, mode="valid")
-    scores_map = active_map / (noise_map + 1e-12)
+    with PROFILER.section("search.correlate"):
+        active_map = correlate2d(fft_pwr, _COSTAS_KERNEL, mode="valid")
+        noise_map = correlate2d(fft_pwr, _NOISE_KERNEL, mode="valid")
+    with PROFILER.section("search.ratio"):
+        scores_map = active_map / (noise_map + 1e-12)
 
     num_windows = scores_map.shape[0]
     max_dt_idx = min(max_dt_idx, num_windows - 1)
@@ -129,13 +135,16 @@ def peak_candidates(
 
     # Max value including the center.
     neighborhood = np.ones((3, 3), dtype=bool)
-    max_full = maximum_filter(scores, footprint=neighborhood, mode="constant", cval=-np.inf)
+    with PROFILER.section("search.max_full"):
+        max_full = maximum_filter(scores, footprint=neighborhood, mode="constant", cval=-np.inf)
     # Max value of neighbors excluding the center element.
     neighbor_foot = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=bool)
-    max_neighbors = maximum_filter(scores, footprint=neighbor_foot, mode="constant", cval=-np.inf)
+    with PROFILER.section("search.max_neighbors"):
+        max_neighbors = maximum_filter(scores, footprint=neighbor_foot, mode="constant", cval=-np.inf)
 
     mask = (scores >= threshold) & (scores == max_full) & (scores > max_neighbors)
-    dt_idx, freq_idx = np.nonzero(mask)
+    with PROFILER.section("search.nonzero"):
+        dt_idx, freq_idx = np.nonzero(mask)
     results = [
         (float(scores[i, j]), float(dts[i]), float(freqs[j]))
         for i, j in zip(dt_idx, freq_idx)
