@@ -1,5 +1,5 @@
-numpy>=1.24
-scipy>=1.10
-ldpc>=0.1.3
+numpy==2.3.2
+scipy==1.16.1
+ldpc==2.3.8
 pytest>=7.0
 
