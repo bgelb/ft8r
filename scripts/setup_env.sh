@@ -132,7 +132,7 @@ setup_linux() {
 #!/usr/bin/env bash
 set -euo pipefail
 export LD_LIBRARY_PATH="$(python3 -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$usrlibwsjtx"):\${LD_LIBRARY_PATH:-}"
-exec "$(python3 -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$usrbin/$tool")" "$@"
+exec "$(python3 -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$usrbin/$tool")" "\$@"
 EOF
       chmod +x "$BIN_DIR/$tool"
     fi
@@ -169,7 +169,11 @@ run_tests() {
   # shellcheck disable=SC1090
   source "$VENV_DIR/bin/activate"
   export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
-  export WSJTX_BIN_DIR="${WSJTX_BIN_DIR:-$BIN_DIR}"
+  # Always use repo-local WSJT-X binaries for tests, regardless of the
+  # caller's environment. This avoids accidental use of a global install.
+  unset WSJTX_BIN_DIR || true
+  export WSJTX_BIN_DIR="$BIN_DIR"
+  log "Using WSJTX_BIN_DIR=$WSJTX_BIN_DIR"
   log "Running pytest"
   pytest -q
   deactivate || true
