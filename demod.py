@@ -69,6 +69,11 @@ try:
     _MIN_LLR_AVG = float(os.getenv("FT8R_MIN_LLR_AVG", "0"))
 except Exception:
     _MIN_LLR_AVG = 0.0
+_ENV_MAX = os.getenv("FT8R_MAX_CANDIDATES", "").strip()
+# Default cap chosen from empirical candidate distribution (p99≈1244, max≈1260)
+# across bundled samples, with headroom. Set to 0 to disable capping.
+_MAX_CANDIDATES = 1500 if _ENV_MAX == "" else int(_ENV_MAX)
+_DISABLE_LEGACY = os.getenv("FT8R_DISABLE_LEGACY", "0") not in ("0", "", "false", "False")
 # Offset of the band edges relative to ``freq`` expressed in tone spacings.
 # ``freq`` corresponds to tone 0 so the bottom edge lies 1.5 tone spacings
 # below it and the top edge is ``SLICE_SPAN_TONES - 1.5`` spacings above.
@@ -480,6 +485,8 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
     results = []
     # Precompute FFT of the full window once per period for reuse across candidates
     precomputed_fft = _prepare_full_fft(samples_in)
+    if _MAX_CANDIDATES > 0:
+        candidates = candidates[:_MAX_CANDIDATES]
     for score, dt, freq in candidates:
         start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
         end = start + sym_len * FT8_SYMBOLS_PER_MESSAGE
@@ -519,31 +526,31 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
         if decoded_any:
             continue
 
-        # Legacy fallback
-        try:
-            with PROFILER.section("align.pipeline_legacy"):
-                bb, dt_f, freq_f = _fine_sync_candidate_legacy(
-                    samples_in, freq, dt, precomputed_fft=precomputed_fft
-                )
-            with PROFILER.section("demod.soft"):
-                llrs = soft_demod(bb)
-            if _MIN_LLR_AVG > 0.0 and float(np.mean(np.abs(llrs))) < _MIN_LLR_AVG:
-                raise RuntimeError("low_llr")
-            hard_bits = naive_hard_decode(llrs)
-            if check_crc(hard_bits):
-                decoded_bits = hard_bits
-            else:
-                with PROFILER.section("ldpc.total"):
-                    decoded_bits = ldpc_decode(llrs)
-            text = decode77(decoded_bits[:77])
-            results.append({
-                "message": text,
-                "score": score,
-                "freq": freq_f,
-                "dt": dt_f,
-            })
-        except Exception:
-            pass
+        if not _DISABLE_LEGACY:
+            try:
+                with PROFILER.section("align.pipeline_legacy"):
+                    bb, dt_f, freq_f = _fine_sync_candidate_legacy(
+                        samples_in, freq, dt, precomputed_fft=precomputed_fft
+                    )
+                with PROFILER.section("demod.soft"):
+                    llrs = soft_demod(bb)
+                if _MIN_LLR_AVG > 0.0 and float(np.mean(np.abs(llrs))) < _MIN_LLR_AVG:
+                    raise RuntimeError("low_llr")
+                hard_bits = naive_hard_decode(llrs)
+                if check_crc(hard_bits):
+                    decoded_bits = hard_bits
+                else:
+                    with PROFILER.section("ldpc.total"):
+                        decoded_bits = ldpc_decode(llrs)
+                text = decode77(decoded_bits[:77])
+                results.append({
+                    "message": text,
+                    "score": score,
+                    "freq": freq_f,
+                    "dt": dt_f,
+                })
+            except Exception:
+                pass
 
     return results
 
