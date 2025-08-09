@@ -164,14 +164,61 @@ def fine_time_sync(samples: ComplexSamples, dt: float, search: int) -> float:
     ]
     best = int(np.argmax(energies))
     best_off = offsets[best]
+
+    # Sub-sample refinement using parabolic interpolation around the peak.
+    frac = 0.0
+    if 0 < best < len(energies) - 1:
+        y1, y2, y3 = energies[best - 1], energies[best], energies[best + 1]
+        denom = (y1 - 2.0 * y2 + y3)
+        if abs(denom) > 1e-12:
+            frac = 0.5 * (y1 - y3) / denom
+            # Limit to ±0.5 sample to avoid instability on flat tops
+            frac = float(np.clip(frac, -0.5, 0.5))
+
+    return dt + (best_off + frac) / sample_rate
+
+
+def _fine_time_sync_integer(samples: ComplexSamples, dt: float, search: int) -> float:
+    """Return refined ``dt`` using integer-sample peak only (legacy behavior)."""
+
+    sample_rate = samples.sample_rate_in_hz
+    base_start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
+    offsets = range(-search, search + 1)
+    energies = [
+        _costas_energy(samples, base_start + off, 0.0) for off in offsets
+    ]
+    best = int(np.argmax(energies))
+    best_off = offsets[best]
     return dt + best_off / sample_rate
 
 
 def fine_freq_sync(
     samples: ComplexSamples, dt: float, search_hz: float, step_hz: float
 ) -> float:
-    """Return frequency offset maximizing Costas energy."""
+    """Return frequency offset maximizing Costas energy with sub-bin refinement."""
 
+    sample_rate = samples.sample_rate_in_hz
+    start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
+    freqs = np.arange(-search_hz, search_hz + step_hz / 2, step_hz)
+    energies = [_costas_energy(samples, start, f) for f in freqs]
+    best = int(np.argmax(energies))
+
+    # Sub-bin refinement via parabolic interpolation around the peak.
+    frac = 0.0
+    if 0 < best < len(energies) - 1:
+        y1, y2, y3 = energies[best - 1], energies[best], energies[best + 1]
+        denom = (y1 - 2.0 * y2 + y3)
+        if abs(denom) > 1e-18:
+            frac = 0.5 * (y1 - y3) / denom
+            frac = float(np.clip(frac, -0.5, 0.5))
+
+    return float(freqs[best] + frac * step_hz)
+
+
+def _fine_freq_sync_maxbin(
+    samples: ComplexSamples, dt: float, search_hz: float, step_hz: float
+) -> float:
+    """Return frequency offset using maximum bin only (legacy behavior)."""
     sample_rate = samples.sample_rate_in_hz
     start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
     freqs = np.arange(-search_hz, search_hz + step_hz / 2, step_hz)
@@ -198,6 +245,35 @@ def fine_sync_candidate(
     bb = downsample_to_baseband(samples_in, freq)
 
     dt = fine_time_sync(bb, dt, 4)
+
+    # One more narrow frequency refinement around the current estimate can help
+    # on some signals, but it marginally hurts others. Keep the pipeline simple
+    # and robust by skipping this optional pass here.
+
+    sym_len = _symbol_samples(bb.sample_rate_in_hz)
+    start = int(round((dt + COSTAS_START_OFFSET_SEC) * bb.sample_rate_in_hz))
+    end = start + sym_len * FT8_SYMBOLS_PER_MESSAGE
+    trimmed = bb.samples[start:end]
+
+    return ComplexSamples(trimmed, bb.sample_rate_in_hz), dt, freq
+
+
+def _fine_sync_candidate_legacy(
+    samples_in: RealSamples, freq: float, dt: float
+) -> Tuple[ComplexSamples, float, float]:
+    """Legacy alignment without sub-sample refinement.
+
+    This mirrors the earlier implementation to act as a safe fallback for
+    borderline signals where fractional interpolation occasionally harms
+    demodulation.
+    """
+
+    bb = downsample_to_baseband(samples_in, freq)
+    dt = _fine_time_sync_integer(bb, dt, 10)
+    df = _fine_freq_sync_maxbin(bb, dt, 5.0, 0.25)
+    freq += df
+    bb = downsample_to_baseband(samples_in, freq)
+    dt = _fine_time_sync_integer(bb, dt, 4)
 
     sym_len = _symbol_samples(bb.sample_rate_in_hz)
     start = int(round((dt + COSTAS_START_OFFSET_SEC) * bb.sample_rate_in_hz))
@@ -336,22 +412,24 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
         margin = int(round(10 * sample_rate / BASEBAND_RATE_HZ))
         if start - margin < 0 or end + margin > len(samples_in.samples):
             continue
-        try:
-            bb, dt_f, freq_f = fine_sync_candidate(samples_in, freq, dt)
-        except ValueError:
-            continue
-        llrs = soft_demod(bb)
-        decoded_bits = ldpc_decode(llrs)
-        try:
-            text = decode77(decoded_bits[:77])
-        except Exception:
-            continue
-        results.append({
-            "message": text,
-            "score": score,
-            "freq": freq_f,
-            "dt": dt_f,
-        })
+        # Run both refined and legacy alignments; keep any decodes they yield.
+        for align_func in (fine_sync_candidate, _fine_sync_candidate_legacy):
+            try:
+                bb, dt_f, freq_f = align_func(samples_in, freq, dt)
+            except ValueError:
+                continue
+            llrs = soft_demod(bb)
+            decoded_bits = ldpc_decode(llrs)
+            try:
+                text = decode77(decoded_bits[:77])
+            except Exception:
+                continue
+            results.append({
+                "message": text,
+                "score": score,
+                "freq": freq_f,
+                "dt": dt_f,
+            })
 
     return results
 
