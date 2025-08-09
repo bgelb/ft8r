@@ -74,6 +74,7 @@ _ENV_MAX = os.getenv("FT8R_MAX_CANDIDATES", "").strip()
 # across bundled samples, with headroom. Set to 0 to disable capping.
 _MAX_CANDIDATES = 1500 if _ENV_MAX == "" else int(_ENV_MAX)
 _DISABLE_LEGACY = os.getenv("FT8R_DISABLE_LEGACY", "0") not in ("0", "", "false", "False")
+_RUN_BOTH_ALIGNMENTS = os.getenv("FT8R_RUN_BOTH", "1") not in ("0", "false", "False")
 # Offset of the band edges relative to ``freq`` expressed in tone spacings.
 # ``freq`` corresponds to tone 0 so the bottom edge lies 1.5 tone spacings
 # below it and the top edge is ``SLICE_SPAN_TONES - 1.5`` spacings above.
@@ -493,7 +494,7 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
         margin = int(round(10 * sample_rate / BASEBAND_RATE_HZ))
         if start - margin < 0 or end + margin > len(samples_in.samples):
             continue
-        # Try refined path first; only fall back to legacy if it fails
+        # Try refined path first; optionally also run legacy afterward
         decoded_any = False
         try:
             with PROFILER.section("align.pipeline_refined"):
@@ -523,10 +524,7 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
         except Exception:
             decoded_any = False
 
-        if decoded_any:
-            continue
-
-        if not _DISABLE_LEGACY:
+        if not _DISABLE_LEGACY and (_RUN_BOTH_ALIGNMENTS or not decoded_any):
             try:
                 with PROFILER.section("align.pipeline_legacy"):
                     bb, dt_f, freq_f = _fine_sync_candidate_legacy(
