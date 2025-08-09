@@ -4,28 +4,44 @@ This repository explores building an FT8 demodulator. The test suite can run ful
 
 ### Quick start
 
-1) Set up the local environment (downloads WSJT-X and creates a venv):
+One command to fully prepare the environment (WSJT-X, Python venv, sample dataset) and optionally run tests:
 
 ```bash
-./scripts/setup_env.sh
+./scripts/setup_env.sh --test
 ```
 
-2) Activate the virtual environment:
+What this does:
+- Downloads WSJT-X locally into `.wsjtx/` and exposes CLI tools (e.g., `jt9`, `ft8code`, optionally `ft8sim`) via `.wsjtx/bin/`.
+- Creates a Python virtual environment at `.venv/` and installs `requirements.txt`.
+- Fetches the FT8 sample dataset from `kgoba/ft8_lib` into `ft8_lib-2.0/test/wav` used by the test suite.
+- Runs the test suite (`pytest -q`).
+
+To work interactively after setup:
 
 ```bash
 source .venv/bin/activate
-```
-
-3) Run the tests:
-
-```bash
 pytest -q
 ```
 
 Notes
-- The setup script downloads a WSJT-X binary package locally into `.wsjtx/` and exposes CLI tools (e.g., `jt9`, `ft8code`, optionally `ft8sim`) via `.wsjtx/bin/`.
 - A small subset of tests require `ft8sim` (used only to synthesize FT8 test audio). If `ft8sim` is not present in the WSJT-X binary package for your platform, those tests are automatically skipped. All other tests still run, including those using the bundled `ft8_lib-2.0/test/wav` sample files and the `jt9` decoder.
 - If you already have WSJT-X installed elsewhere, you can point the test suite at its CLI tools by setting `WSJTX_BIN_DIR` to the directory containing `jt9`, `ft8code`, and `ft8sim`.
+- To only set up without running tests, omit `--test`.
+
+### Maintenance
+
+The setup script supports convenient flags:
+
+```bash
+# Remove venv, local WSJT-X, temp files, and fetched samples
+./scripts/setup_env.sh --clean
+
+# Install everything but skip WSJT-X or dataset fetch
+./scripts/setup_env.sh --no-wsjt --no-samples
+
+# Run tests after setup
+./scripts/setup_env.sh --test
+```
 
 ### Platform support
 - macOS: Downloads and mounts the WSJT-X `.dmg`, keeps the app bundle under `.wsjtx/`, and links CLI tools from inside the bundle.
