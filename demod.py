@@ -17,6 +17,7 @@ from utils import (
 )
 
 from search import find_candidates
+from utils.prof import PROFILER
 
 # Symbol positions occupied by the three 7-symbol Costas sequences.
 COSTAS_POSITIONS = list(range(7)) + list(range(36, 43)) + list(range(72, 79))
@@ -82,7 +83,8 @@ def downsample_to_baseband(samples_in: RealSamples, freq: float) -> ComplexSampl
     else:
         audio = np.pad(audio, (0, full_fft_len - len(audio)))
 
-    full_fft = np.fft.rfft(audio)
+    with PROFILER.section("baseband.rfft_full"):
+        full_fft = np.fft.rfft(audio)
 
     bin_spacing_hz = sample_rate / full_fft_len
     symbol_rate_hz = TONE_SPACING_IN_HZ
@@ -106,7 +108,8 @@ def downsample_to_baseband(samples_in: RealSamples, freq: float) -> ComplexSampl
     bin_shift = candidate_bin - start_bin
     slice_fft = np.roll(slice_fft, -bin_shift)
 
-    time_series = np.fft.ifft(slice_fft)
+    with PROFILER.section("baseband.irfft_slice"):
+        time_series = np.fft.ifft(slice_fft)
     time_series *= 1 / np.sqrt(full_fft_len * _FFT_SLICE_LEN)
 
     return ComplexSamples(time_series, sample_rate_in_hz=BASEBAND_RATE_HZ)
@@ -159,9 +162,10 @@ def fine_time_sync(samples: ComplexSamples, dt: float, search: int) -> float:
     base_start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
 
     offsets = range(-search, search + 1)
-    energies = [
-        _costas_energy(samples, base_start + off, 0.0) for off in offsets
-    ]
+    with PROFILER.section("align.costas_energy_time"):
+        energies = [
+            _costas_energy(samples, base_start + off, 0.0) for off in offsets
+        ]
     best = int(np.argmax(energies))
     best_off = offsets[best]
 
@@ -184,9 +188,10 @@ def _fine_time_sync_integer(samples: ComplexSamples, dt: float, search: int) -> 
     sample_rate = samples.sample_rate_in_hz
     base_start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
     offsets = range(-search, search + 1)
-    energies = [
-        _costas_energy(samples, base_start + off, 0.0) for off in offsets
-    ]
+    with PROFILER.section("align.costas_energy_time_legacy"):
+        energies = [
+            _costas_energy(samples, base_start + off, 0.0) for off in offsets
+        ]
     best = int(np.argmax(energies))
     best_off = offsets[best]
     return dt + best_off / sample_rate
@@ -200,7 +205,8 @@ def fine_freq_sync(
     sample_rate = samples.sample_rate_in_hz
     start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
     freqs = np.arange(-search_hz, search_hz + step_hz / 2, step_hz)
-    energies = [_costas_energy(samples, start, f) for f in freqs]
+    with PROFILER.section("align.costas_energy_freq"):
+        energies = [_costas_energy(samples, start, f) for f in freqs]
     best = int(np.argmax(energies))
 
     # Sub-bin refinement via parabolic interpolation around the peak.
@@ -222,7 +228,8 @@ def _fine_freq_sync_maxbin(
     sample_rate = samples.sample_rate_in_hz
     start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
     freqs = np.arange(-search_hz, search_hz + step_hz / 2, step_hz)
-    energies = [_costas_energy(samples, start, f) for f in freqs]
+    with PROFILER.section("align.costas_energy_freq_legacy"):
+        energies = [_costas_energy(samples, start, f) for f in freqs]
     best = int(np.argmax(energies))
     return float(freqs[best])
 
@@ -232,19 +239,24 @@ def fine_sync_candidate(
 ) -> Tuple[ComplexSamples, float, float]:
     """Return finely aligned baseband, ``dt`` and ``freq`` for ``samples_in``."""
 
-    bb = downsample_to_baseband(samples_in, freq)
+    with PROFILER.section("align.downsample_pre"):
+        bb = downsample_to_baseband(samples_in, freq)
 
-    dt = fine_time_sync(bb, dt, 10)
+    with PROFILER.section("align.fine_time"):
+        dt = fine_time_sync(bb, dt, 10)
     # ``find_candidates`` only locates frequencies to the nearest FT8 tone
     # spacing (6.25 Hz).  Some of the test samples include signals that fall
     # roughly halfway between these coarse bins.  Increase the fine frequency
     # search span and resolution so such offsets can be recovered.
-    df = fine_freq_sync(bb, dt, 5.0, 0.25)
+    with PROFILER.section("align.fine_freq"):
+        df = fine_freq_sync(bb, dt, 5.0, 0.25)
     freq += df
 
-    bb = downsample_to_baseband(samples_in, freq)
+    with PROFILER.section("align.downsample_post"):
+        bb = downsample_to_baseband(samples_in, freq)
 
-    dt = fine_time_sync(bb, dt, 4)
+    with PROFILER.section("align.fine_time_post"):
+        dt = fine_time_sync(bb, dt, 4)
 
     # One more narrow frequency refinement around the current estimate can help
     # on some signals, but it marginally hurts others. Keep the pipeline simple
@@ -302,17 +314,20 @@ def soft_demod(samples_in: ComplexSamples) -> np.ndarray:
     # row corresponds to one symbol worth of data.  This allows the tone
     # responses for all symbols to be computed in a single matrix
     # multiplication.
-    seg = _symbol_matrix(samples, start, sym_len)
+    with PROFILER.section("demod.symbol_matrix"):
+        seg = _symbol_matrix(samples, start, sym_len)
 
     # ``resp`` has shape ``(8, FT8_SYMBOLS_PER_MESSAGE)`` and contains the
     # magnitude response of each tone for every symbol.
-    resp = np.abs(bases @ seg.T)
+    with PROFILER.section("demod.tone_response"):
+        resp = np.abs(bases @ seg.T)
 
     # Remove the Costas symbols used for synchronization.
     payload_resp = np.delete(resp, COSTAS_POSITIONS, axis=1)
 
     # Normalize to per-symbol probabilities.
-    probs = payload_resp / payload_resp.sum(axis=0, keepdims=True)
+    with PROFILER.section("demod.normalize"):
+        probs = payload_resp / payload_resp.sum(axis=0, keepdims=True)
 
     # Pre-build Gray-code bit masks to compute log-likelihood ratios with
     # broadcasting. ``gray_bits`` has shape ``(3, 8)`` where each row selects the
@@ -322,9 +337,10 @@ def soft_demod(samples_in: ComplexSamples) -> np.ndarray:
     )
 
     mask = gray_bits[:, :, None]
-    ones = np.where(mask, probs[None, :, :], 0).sum(axis=1)
-    zeros = np.where(~mask, probs[None, :, :], 0).sum(axis=1)
-    llrs = np.log(ones + 1e-12) - np.log(zeros + 1e-12)
+    with PROFILER.section("demod.llr"):
+        ones = np.where(mask, probs[None, :, :], 0).sum(axis=1)
+        zeros = np.where(~mask, probs[None, :, :], 0).sum(axis=1)
+        llrs = np.log(ones + 1e-12) - np.log(zeros + 1e-12)
 
     return llrs.T.ravel()
 
@@ -357,11 +373,13 @@ def ldpc_decode(llrs: np.ndarray) -> str:
     # tuned empirically by trying a range of values and selecting the one that
     # best matched WSJT-X's decode rate on the sample set.
     error_prob = 1.0 / (np.exp(7.0 * np.abs(llrs)) + 1.0)
-    _LDPC_DECODER.update_channel_probs(error_prob)
+    with PROFILER.section("ldpc.update_channel_probs"):
+        _LDPC_DECODER.update_channel_probs(error_prob)
 
     syndrome = (LDPC_174_91_H @ hard) % 2
     syndrome = syndrome.astype(np.uint8)
-    err_est = _LDPC_DECODER.decode(syndrome)
+    with PROFILER.section("ldpc.decode"):
+        err_est = _LDPC_DECODER.decode(syndrome)
     corrected = np.bitwise_xor(err_est.astype(np.uint8), hard)
     bits = "".join("1" if b else "0" for b in corrected.astype(int))
     return bits
@@ -401,9 +419,10 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
     max_dt_samples = len(samples_in.samples) - int(sample_rate * COSTAS_START_OFFSET_SEC)
     max_dt_symbols = -(-max_dt_samples // sym_len)
 
-    candidates = find_candidates(
-        samples_in, max_freq_bin, max_dt_symbols, threshold=threshold
-    )
+    with PROFILER.section("search.find_candidates"):
+        candidates = find_candidates(
+            samples_in, max_freq_bin, max_dt_symbols, threshold=threshold
+        )
 
     results = []
     for score, dt, freq in candidates:
@@ -415,11 +434,19 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
         # Run both refined and legacy alignments; keep any decodes they yield.
         for align_func in (fine_sync_candidate, _fine_sync_candidate_legacy):
             try:
-                bb, dt_f, freq_f = align_func(samples_in, freq, dt)
+                name = (
+                    "align.pipeline_refined"
+                    if align_func is fine_sync_candidate
+                    else "align.pipeline_legacy"
+                )
+                with PROFILER.section(name):
+                    bb, dt_f, freq_f = align_func(samples_in, freq, dt)
             except ValueError:
                 continue
-            llrs = soft_demod(bb)
-            decoded_bits = ldpc_decode(llrs)
+            with PROFILER.section("demod.soft"):
+                llrs = soft_demod(bb)
+            with PROFILER.section("ldpc.total"):
+                decoded_bits = ldpc_decode(llrs)
             try:
                 text = decode77(decoded_bits[:77])
             except Exception:
