@@ -75,6 +75,15 @@ _ENV_MAX = os.getenv("FT8R_MAX_CANDIDATES", "").strip()
 _MAX_CANDIDATES = 1500 if _ENV_MAX == "" else int(_ENV_MAX)
 _DISABLE_LEGACY = os.getenv("FT8R_DISABLE_LEGACY", "0") not in ("0", "", "false", "False")
 _RUN_BOTH_ALIGNMENTS = os.getenv("FT8R_RUN_BOTH", "1") not in ("0", "false", "False")
+# Successive interference cancellation controls (default off to avoid regressions)
+try:
+    _SIC_PASSES = int(os.getenv("FT8R_SIC_PASSES", "0"))
+except Exception:
+    _SIC_PASSES = 0
+try:
+    _SIC_ALPHA = float(os.getenv("FT8R_SIC_ALPHA", "0.7"))
+except Exception:
+    _SIC_ALPHA = 0.7
 # Offset of the band edges relative to ``freq`` expressed in tone spacings.
 # ``freq`` corresponds to tone 0 so the bottom edge lies 1.5 tone spacings
 # below it and the top edge is ``SLICE_SPAN_TONES - 1.5`` spacings above.
@@ -167,6 +176,91 @@ def _symbol_matrix(samples: np.ndarray, start: int, sym_len: int) -> np.ndarray:
     """Return ``samples`` sliced and reshaped into a symbol matrix."""
     seg = samples[start : start + sym_len * FT8_SYMBOLS_PER_MESSAGE]
     return seg.reshape(FT8_SYMBOLS_PER_MESSAGE, sym_len)
+
+
+# Map 3-bit Gray code value to tone index and back
+_GRAY_TO_TONE = {GRAY_MAP[i]: i for i in range(8)}
+_TONE_TO_GRAY = {i: GRAY_MAP[i] for i in range(8)}
+
+
+def _bits_to_tone_sequence(bits_174: str) -> List[int]:
+    """Return 79-length tone index sequence including Costas positions.
+
+    The 174 coded bits are interpreted as 58 groups of 3 bits in time order
+    across payload symbols (Costas removed). Each 3-bit group is Gray-decoded
+    to a tone index 0..7.
+    """
+    if len(bits_174) != 174:
+        raise ValueError("bits_174 must be 174 bits long")
+    tones: List[int] = []
+    payload_idx = 0
+    costas_iter = iter(COSTAS_SEQUENCE * 3)
+    for sym in range(FT8_SYMBOLS_PER_MESSAGE):
+        if sym in COSTAS_POSITIONS:
+            tones.append(next(costas_iter))
+        else:
+            b0 = 1 if bits_174[payload_idx + 0] == "1" else 0
+            b1 = 1 if bits_174[payload_idx + 1] == "1" else 0
+            b2 = 1 if bits_174[payload_idx + 2] == "1" else 0
+            gray = (b0 << 2) | (b1 << 1) | b2
+            tone = _GRAY_TO_TONE.get(gray, 0)
+            tones.append(tone)
+            payload_idx += 3
+    return tones
+
+
+def _estimate_symbol_phasors(bb: ComplexSamples, tone_seq: List[int]) -> np.ndarray:
+    """Estimate complex phasor per symbol for a given tone sequence.
+
+    For each symbol, project the symbol-length segment onto the complex basis
+    vector for the selected tone. Returns an array of length 79 of complex
+    coefficients whose product with the basis reconstructs the symbol.
+    """
+    sample_rate = bb.sample_rate_in_hz
+    sym_len = _symbol_samples(sample_rate)
+    seg = _symbol_matrix(bb.samples, 0, sym_len)
+    bases = _zero_offset_bases(sample_rate, sym_len)
+    phasors = np.zeros(FT8_SYMBOLS_PER_MESSAGE, dtype=complex)
+    for s in range(FT8_SYMBOLS_PER_MESSAGE):
+        tone = tone_seq[s]
+        # Use conjugate dot product, normalize by symbol length for stability
+        phasors[s] = np.vdot(bases[tone], seg[s]) / sym_len
+    return phasors
+
+
+def _synthesize_original_signal(
+    samples_in: RealSamples,
+    dt: float,
+    freq_hz: float,
+    tone_seq: List[int],
+    phasors: np.ndarray,
+    alpha: float,
+) -> Tuple[int, np.ndarray]:
+    """Return (start_index, signal) synthesized at original rate to subtract.
+
+    The returned `signal` has length equal to 79 symbols at the original
+    sample rate. It is scaled by `alpha`.
+    """
+    orig_sr = samples_in.sample_rate_in_hz
+    sym_len_orig = _symbol_samples(orig_sr)
+    start_idx = int(round((dt + COSTAS_START_OFFSET_SEC) * orig_sr))
+    total_len = sym_len_orig * FT8_SYMBOLS_PER_MESSAGE
+    out = np.zeros(total_len)
+    # Precompute time vector for one symbol at original rate
+    t = np.arange(sym_len_orig) / orig_sr
+    for s in range(FT8_SYMBOLS_PER_MESSAGE):
+        tone = tone_seq[s]
+        # Complex exponential at absolute frequency
+        omega = 2.0 * np.pi * (freq_hz + tone * TONE_SPACING_IN_HZ)
+        carrier = np.cos(omega * t)  # in-phase component
+        # Use phasor's angle to add quadrature if needed
+        # phasor = a * (cos(phi) + j sin(phi))
+        a = float(np.abs(phasors[s]))
+        phi = float(np.angle(phasors[s]))
+        # Real signal matching in-phase/quadrature via cos(phi) and sin(phi)
+        synth = a * (np.cos(phi) * carrier - np.sin(phi) * np.sin(omega * t))
+        out[s * sym_len_orig : (s + 1) * sym_len_orig] += alpha * synth
+    return start_idx, out
 
 
 def _costas_energy(
@@ -478,60 +572,41 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
     max_dt_samples = len(samples_in.samples) - int(sample_rate * COSTAS_START_OFFSET_SEC)
     max_dt_symbols = -(-max_dt_samples // sym_len)
 
-    with PROFILER.section("search.find_candidates"):
-        candidates = find_candidates(
-            samples_in, max_freq_bin, max_dt_symbols, threshold=threshold
-        )
+    results: List[Dict[str, float | str]] = []
+    # Work on a residual copy for SIC passes
+    residual = RealSamples(samples_in.samples.copy(), sample_rate)
+    for sic_pass in range(0, max(1, _SIC_PASSES + 1)):
+        with PROFILER.section("search.find_candidates"):
+            candidates = find_candidates(
+                residual, max_freq_bin, max_dt_symbols, threshold=threshold
+            )
+        if _MAX_CANDIDATES > 0:
+            candidates = candidates[:_MAX_CANDIDATES]
 
-    results = []
-    # Precompute FFT of the full window once per period for reuse across candidates
-    precomputed_fft = _prepare_full_fft(samples_in)
-    if _MAX_CANDIDATES > 0:
-        candidates = candidates[:_MAX_CANDIDATES]
-    for score, dt, freq in candidates:
-        start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
-        end = start + sym_len * FT8_SYMBOLS_PER_MESSAGE
-        margin = int(round(10 * sample_rate / BASEBAND_RATE_HZ))
-        if start - margin < 0 or end + margin > len(samples_in.samples):
-            continue
-        # Try refined path first; optionally also run legacy afterward
-        decoded_any = False
-        try:
-            with PROFILER.section("align.pipeline_refined"):
-                bb, dt_f, freq_f = fine_sync_candidate(
-                    samples_in, freq, dt, precomputed_fft=precomputed_fft
-                )
-            with PROFILER.section("demod.soft"):
-                llrs = soft_demod(bb)
-            # Optional quick rejection by average |LLR|
-            if _MIN_LLR_AVG > 0.0 and float(np.mean(np.abs(llrs))) < _MIN_LLR_AVG:
-                raise RuntimeError("low_llr")
-            # Try hard-decision CRC first to avoid expensive LDPC when possible
-            hard_bits = naive_hard_decode(llrs)
-            if check_crc(hard_bits):
-                decoded_bits = hard_bits
-            else:
-                with PROFILER.section("ldpc.total"):
-                    decoded_bits = ldpc_decode(llrs)
-            text = decode77(decoded_bits[:77])
-            results.append({
-                "message": text,
-                "score": score,
-                "freq": freq_f,
-                "dt": dt_f,
-            })
-            decoded_any = True
-        except Exception:
+        # Precompute FFT once per pass for all candidates
+        precomputed_fft = _prepare_full_fft(residual)
+
+        accepted_for_subtraction: List[Tuple[float, float, float, List[int], np.ndarray]] = []
+
+        for score, dt, freq in candidates:
+            start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
+            end = start + sym_len * FT8_SYMBOLS_PER_MESSAGE
+            margin = int(round(10 * sample_rate / BASEBAND_RATE_HZ))
+            if start - margin < 0 or end + margin > len(residual.samples):
+                continue
+            # Try refined path first; optionally also run legacy afterward
             decoded_any = False
-
-        if not _DISABLE_LEGACY and (_RUN_BOTH_ALIGNMENTS or not decoded_any):
+            local_bb = None
+            dt_f = dt
+            freq_f = freq
+            decoded_bits = None
             try:
-                with PROFILER.section("align.pipeline_legacy"):
-                    bb, dt_f, freq_f = _fine_sync_candidate_legacy(
-                        samples_in, freq, dt, precomputed_fft=precomputed_fft
+                with PROFILER.section("align.pipeline_refined"):
+                    local_bb, dt_f, freq_f = fine_sync_candidate(
+                        residual, freq, dt, precomputed_fft=precomputed_fft
                     )
                 with PROFILER.section("demod.soft"):
-                    llrs = soft_demod(bb)
+                    llrs = soft_demod(local_bb)
                 if _MIN_LLR_AVG > 0.0 and float(np.mean(np.abs(llrs))) < _MIN_LLR_AVG:
                     raise RuntimeError("low_llr")
                 hard_bits = naive_hard_decode(llrs)
@@ -547,8 +622,66 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
                     "freq": freq_f,
                     "dt": dt_f,
                 })
+                decoded_any = True
             except Exception:
-                pass
+                decoded_any = False
+
+            if not _DISABLE_LEGACY and (_RUN_BOTH_ALIGNMENTS or not decoded_any):
+                try:
+                    with PROFILER.section("align.pipeline_legacy"):
+                        local_bb, dt_f, freq_f = _fine_sync_candidate_legacy(
+                            residual, freq, dt, precomputed_fft=precomputed_fft
+                        )
+                    with PROFILER.section("demod.soft"):
+                        llrs = soft_demod(local_bb)
+                    if _MIN_LLR_AVG > 0.0 and float(np.mean(np.abs(llrs))) < _MIN_LLR_AVG:
+                        raise RuntimeError("low_llr")
+                    hard_bits = naive_hard_decode(llrs)
+                    if check_crc(hard_bits):
+                        decoded_bits = hard_bits
+                    else:
+                        with PROFILER.section("ldpc.total"):
+                            decoded_bits = ldpc_decode(llrs)
+                    text = decode77(decoded_bits[:77])
+                    results.append({
+                        "message": text,
+                        "score": score,
+                        "freq": freq_f,
+                        "dt": dt_f,
+                    })
+                    decoded_any = True
+                except Exception:
+                    decoded_any = False
+
+            # Queue for subtraction only if we successfully decoded and have bb
+            if decoded_any and decoded_bits is not None and local_bb is not None and _SIC_PASSES > 0:
+                tone_seq = _bits_to_tone_sequence(decoded_bits)
+                phasors = _estimate_symbol_phasors(local_bb, tone_seq)
+                accepted_for_subtraction.append((dt_f, freq_f, score, tone_seq, phasors))
+
+        # After processing all candidates, subtract in batch and proceed to next pass
+        if _SIC_PASSES > 0 and len(accepted_for_subtraction) > 0 and sic_pass < _SIC_PASSES:
+            # Optionally limit number subtracted per pass by score (highest first)
+            accepted_for_subtraction.sort(key=lambda x: x[2], reverse=True)
+            residual_samples = residual.samples.copy()
+            for dt_f, freq_f, _score, tone_seq, phasors in accepted_for_subtraction:
+                start_idx, synth = _synthesize_original_signal(
+                    residual, dt_f, freq_f, tone_seq, phasors, _SIC_ALPHA
+                )
+                end_idx = start_idx + len(synth)
+                if start_idx < 0 or end_idx > len(residual_samples):
+                    continue
+                residual_samples[start_idx:end_idx] -= synth
+            residual = RealSamples(residual_samples, sample_rate)
+
+        # Stop if no SIC or no new candidates to subtract
+        if _SIC_PASSES == 0 or len(accepted_for_subtraction) == 0:
+            # Either we are not doing SIC or nothing new was decoded to cancel
+            if sic_pass > 0:
+                break
+            # If zero passes configured, we only ran once
+            if _SIC_PASSES == 0:
+                break
 
     return results
 
