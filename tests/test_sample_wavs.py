@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 
+import os
 from demod import decode_full_period
 from utils import read_wav
 from tests.utils import DEFAULT_DT_EPS, DEFAULT_FREQ_EPS
@@ -17,7 +18,7 @@ SAMPLES = {
     "191111_110115": (1, 0),
     "191111_110130": (4, 1),
     "191111_110145": (1, 0),
-    "191111_110200": (3, 2),
+    "191111_110200": (4, 1),
     "191111_110215": (2, 1),
     "191111_110615": (15, 6),
     "191111_110630": (10, 4),
@@ -31,7 +32,7 @@ SAMPLES = {
     "websdr_test5": (18, 9),
     "websdr_test6": (19, 11),
     "websdr_test7": (19, 6),
-    "websdr_test8": (15, 11),
+    "websdr_test8": (16, 10),
     "websdr_test9": (7, 17),
     "websdr_test10": (11, 4),
     "websdr_test11": (11, 12),
@@ -48,7 +49,7 @@ SAMPLES = {
     "20m_busy/test_08": (11, 8),
     "20m_busy/test_09": (15, 10),
     "20m_busy/test_10": (13, 5),
-    "20m_busy/test_11": (15, 14),
+    "20m_busy/test_11": (16, 13),
     "20m_busy/test_12": (13, 2),
     "20m_busy/test_13": (18, 2),
     "20m_busy/test_14": (11, 4),
@@ -75,7 +76,13 @@ SAMPLES = {
     "20m_busy/test_35": (15, 11),
     "20m_busy/test_36": (11, 9),
     "20m_busy/test_37": (14, 4),
-    "20m_busy/test_38": (13, 3),
+    "20m_busy/test_38": (14, 2),
+}
+
+# Multi-pass expected matches where they differ from single-pass. Only list entries
+# that change; unspecified entries are assumed identical between SP and MP.
+SAMPLES_MP_DIFF = {
+    # If multi-pass differs from single-pass, capture overrides here.
 }
 
 
@@ -119,16 +126,56 @@ import pytest
 
 
 @pytest.mark.parametrize("stem,expected", SAMPLES.items(), ids=idfn)
-def test_decode_sample_wavs(stem, expected):
+def test_decode_sample_wavs_single_pass(stem, expected):
     expected_success, expected_fail = expected
     wav_path = DATA_DIR / f"{stem}.wav"
     txt_path = DATA_DIR / f"{stem}.txt"
 
     audio = read_wav(str(wav_path))
-    results = decode_full_period(audio)
+    # Ensure SIC disabled for single-pass baseline
+    old = os.environ.get("FT8R_SIC_PASSES")
+    os.environ["FT8R_SIC_PASSES"] = "0"
+    try:
+        results = decode_full_period(audio)
+    finally:
+        if old is None:
+            os.environ.pop("FT8R_SIC_PASSES", None)
+        else:
+            os.environ["FT8R_SIC_PASSES"] = old
 
     expected_records = parse_expected(txt_path)
     matched = check_decodes(results, expected_records)
 
     assert matched == expected_success
     assert len(expected_records) - matched == expected_fail
+
+
+@pytest.mark.parametrize("stem,expected", SAMPLES.items(), ids=idfn)
+def test_decode_sample_wavs_multi_pass(stem, expected):
+    # Determine expected for multi-pass (default to SP expected if no diff)
+    sp_success, sp_fail = expected
+    mp_expected = SAMPLES_MP_DIFF.get(stem, (sp_success, sp_fail))
+    mp_success, mp_fail = mp_expected
+
+    wav_path = DATA_DIR / f"{stem}.wav"
+    txt_path = DATA_DIR / f"{stem}.txt"
+
+    audio = read_wav(str(wav_path))
+
+    old = os.environ.get("FT8R_SIC_PASSES")
+    os.environ["FT8R_SIC_PASSES"] = "1"
+    try:
+        results = decode_full_period(audio)
+    finally:
+        if old is None:
+            os.environ.pop("FT8R_SIC_PASSES", None)
+        else:
+            os.environ["FT8R_SIC_PASSES"] = old
+
+    expected_records = parse_expected(txt_path)
+    matched = check_decodes(results, expected_records)
+
+    # MP should meet its own expected and be no worse than SP
+    assert matched == mp_success
+    assert len(expected_records) - matched == mp_fail
+    assert matched >= sp_success
