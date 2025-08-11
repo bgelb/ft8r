@@ -84,6 +84,7 @@ try:
     _SIC_ALPHA = float(os.getenv("FT8R_SIC_ALPHA", "0.7"))
 except Exception:
     _SIC_ALPHA = 0.7
+_REQUIRE_FINAL_CRC = True
 # Offset of the band edges relative to ``freq`` expressed in tone spacings.
 # ``freq`` corresponds to tone 0 so the bottom edge lies 1.5 tone spacings
 # below it and the top edge is ``SLICE_SPAN_TONES - 1.5`` spacings above.
@@ -615,6 +616,9 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
                 else:
                     with PROFILER.section("ldpc.total"):
                         decoded_bits = ldpc_decode(llrs)
+                    # Optional final CRC gate after LDPC; drop if invalid when enabled
+                    if _REQUIRE_FINAL_CRC and not check_crc(decoded_bits):
+                        raise RuntimeError("crc_fail")
                 text = decode77(decoded_bits[:77])
                 results.append({
                     "message": text,
@@ -642,6 +646,8 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
                     else:
                         with PROFILER.section("ldpc.total"):
                             decoded_bits = ldpc_decode(llrs)
+                        if _REQUIRE_FINAL_CRC and not check_crc(decoded_bits):
+                            raise RuntimeError("crc_fail")
                     text = decode77(decoded_bits[:77])
                     results.append({
                         "message": text,
