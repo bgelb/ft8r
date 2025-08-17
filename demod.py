@@ -19,6 +19,7 @@ from utils import (
 
 from search import find_candidates
 from utils.prof import PROFILER
+from utils.ldpc_colorder import COLORDER_174  # available for future reference
 import os
 
 # Symbol positions occupied by the three 7-symbol Costas sequences.
@@ -48,6 +49,11 @@ _LDPC_DECODER = ldpc.BpOsdDecoder(
     osd_method="OSD_CS",
     osd_order=2,
 )
+
+
+# Note: For the FT8 (174,91) code used here, the transmitted codeword order
+# matches the decoder/LDPC parity matrix column order. The first 91 bits are
+# the 77 message bits followed by the 14 CRC bits.
 
 # Number of FT8 tone spacings carried in the downsampled slice (eight active
 # tones plus one spacing of transition band on either side)
@@ -444,6 +450,9 @@ def ldpc_decode(llrs: np.ndarray) -> str:
     return bits
 
 
+# No CRC-guided flipping: only structurally correct mapping is used.
+
+
 def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
     """Decode all FT8 signals present in ``samples_in``.
 
@@ -508,17 +517,20 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
                 raise RuntimeError("low_llr")
             # Try hard-decision CRC first to avoid expensive LDPC when possible
             hard_bits = naive_hard_decode(llrs)
+            method = "hard"
             if check_crc(hard_bits):
                 decoded_bits = hard_bits
             else:
                 with PROFILER.section("ldpc.total"):
                     decoded_bits = ldpc_decode(llrs)
+                method = "ldpc"
             text = decode77(decoded_bits[:77])
             results.append({
                 "message": text,
                 "score": score,
                 "freq": freq_f,
                 "dt": dt_f,
+                "method": method,
             })
             decoded_any = True
         except Exception:
@@ -535,20 +547,22 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
                 if _MIN_LLR_AVG > 0.0 and float(np.mean(np.abs(llrs))) < _MIN_LLR_AVG:
                     raise RuntimeError("low_llr")
                 hard_bits = naive_hard_decode(llrs)
+                method = "hard"
                 if check_crc(hard_bits):
                     decoded_bits = hard_bits
                 else:
                     with PROFILER.section("ldpc.total"):
                         decoded_bits = ldpc_decode(llrs)
+                    method = "ldpc"
                 text = decode77(decoded_bits[:77])
                 results.append({
                     "message": text,
                     "score": score,
                     "freq": freq_f,
                     "dt": dt_f,
+                    "method": method,
                 })
             except Exception:
                 pass
 
     return results
-

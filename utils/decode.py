@@ -166,15 +166,16 @@ def _decode77_raw(bitstring: str) -> str:
         call1 = _unpack28(n28a)
         call2 = _unpack28(n28b)
         if ipa:
+            # Per QEX/WSJT-X mapping, append "/R" or "/P" to the callsign when indicated.
+            # The 28-bit callsign token is space-padded in encoding, but our
+            # unpack strips spaces, so append directly to the trimmed callsign.
             suff = "/R" if i3 == 1 else "/P"
-            idx = call1.find(" ")
-            if idx >= 3:
-                call1 = call1[:idx] + suff
+            if not call1.endswith(suff):
+                call1 = call1 + suff
         if ipb:
             suff = "/R" if i3 == 1 else "/P"
-            idx = call2.find(" ")
-            if idx >= 3:
-                call2 = call2[:idx] + suff
+            if not call2.endswith(suff):
+                call2 = call2 + suff
         if igrid4 <= MAXGRID4:
             grid = _to_grid4(igrid4)
             if ir:
@@ -268,4 +269,3 @@ def _decode77_raw(bitstring: str) -> str:
 def decode77(bitstring: str) -> str:
     """Decode a 77-bit FT8 message with underscores converted to spaces."""
     return _decode77_raw(bitstring).replace("_", " ")
-
