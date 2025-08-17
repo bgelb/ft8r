@@ -233,8 +233,11 @@ USAGE
   log "Activate venv with: source $VENV_DIR/bin/activate"
   log "WSJT-X binaries directory: $BIN_DIR (export WSJTX_BIN_DIR to override)"
 
-  [[ $do_test -eq 1 ]] && run_tests || true
+  # If tests are requested, run them and honor their exit code so CI fails
+  # when pytest reports failures or errors.
+  if [[ $do_test -eq 1 ]]; then
+    run_tests
+  fi
 }
 
 main "$@"
-
