@@ -66,13 +66,13 @@ jobs:
             let body;
             if (total > 0) {
               body = `${marker}
-**FT8R Short Regression Decode Rate**
-- Raw: ${matched}/${total}
-- Percent: ${percent}%`;
+              **FT8R Short Regression Decode Rate**
+              - Raw: ${matched}/${total}
+              - Percent: ${percent}%`;
             } else {
               body = `${marker}
-**FT8R Short Regression Decode Rate**
-- No short regression metrics were produced in this run.`;
+              **FT8R Short Regression Decode Rate**
+              - No short regression metrics were produced in this run.`;
             }
             const {owner, repo} = context.repo;
             const issue_number = context.issue.number;
