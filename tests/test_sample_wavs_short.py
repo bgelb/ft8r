@@ -6,12 +6,15 @@ from tests.test_sample_wavs import (
     DATA_DIR,
     parse_expected,
     check_decodes,
+    find_wrong_text_decodes,
     list_all_stems,
 )
 
 
 # Minimum aggregate decode ratio required to pass for the short regression
-SHORT_MIN_RATIO = 0.66
+SHORT_MIN_RATIO = 0.68
+# Maximum proportion of wrong-text decodes among overlapping decodes (success+wrong)
+SHORT_MAX_FALSE_OVERLAP_RATIO = 0.18
 
 
 def _short_sample_stems() -> list[str]:
@@ -23,6 +26,9 @@ def _short_sample_stems() -> list[str]:
 def test_decode_sample_wavs_short_aggregate(ft8r_metrics):
     matched_total = 0
     expected_total = 0
+    wrong_total = 0
+    produced_total = 0
+    hard_crc_total = 0
     for stem in _short_sample_stems():
         wav_path = DATA_DIR / f"{stem}.wav"
         txt_path = DATA_DIR / f"{stem}.txt"
@@ -32,13 +38,32 @@ def test_decode_sample_wavs_short_aggregate(ft8r_metrics):
 
         expected_records = parse_expected(txt_path)
         matched = check_decodes(results, expected_records)
+        wrong = find_wrong_text_decodes(results, expected_records)
+        if wrong:
+            # Aid debugging by logging a few mismatches per file
+            print(f"{stem}: {len(wrong)} wrong-text decodes")
+            for rec, (msg, dt_e, freq_e) in wrong[:3]:
+                print(
+                    f"  dt={rec['dt']:.3f}s freq={rec['freq']:.1f}Hz got='{rec['message']}' expected='{msg}'"
+                )
 
         matched_total += matched
         expected_total += len(expected_records)
+        wrong_total += len(wrong)
+        produced_total += len(results)
+        hard_crc_total += sum(1 for r in results if r.get("method") == "hard")
 
     assert expected_total > 0, "No sample records found"
     ratio = matched_total / expected_total
+    overlap = matched_total + wrong_total
+    false_ratio = (wrong_total / overlap) if overlap else 0.0
+    success_overlap_ratio = (matched_total / overlap) if overlap else 0.0
     # update session-level metrics for CI summary
     ft8r_metrics["matched"] += matched_total
     ft8r_metrics["total"] += expected_total
+    print(f"Short summary: produced={produced_total} expected={expected_total} successful={matched_total} false={wrong_total} hard_crc={hard_crc_total}")
+    print(f"Short metrics: coverage_success_ratio={ratio:.3f} success_overlap_ratio={success_overlap_ratio:.3f} false_overlap_ratio={false_ratio:.3f}")
     assert ratio >= SHORT_MIN_RATIO, f"Short aggregate decode ratio {ratio:.3f} < {SHORT_MIN_RATIO:.3f}"
+    assert false_ratio <= SHORT_MAX_FALSE_OVERLAP_RATIO, (
+        f"Short false overlap ratio {false_ratio:.3f} > {SHORT_MAX_FALSE_OVERLAP_RATIO:.3f}"
+    )

@@ -29,6 +29,7 @@ FT8_SYMBOL_LENGTH_IN_SEC = 1.0 / TONE_SPACING_IN_HZ
 FT8_SYMBOLS_PER_MESSAGE = 79
 
 
+# 14-bit CRC used by FT8; polynomial chosen to match ft8code bit ordering
 CRC_POLY = 0x21F2
 
 
