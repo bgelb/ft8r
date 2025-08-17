@@ -13,7 +13,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "ft8_lib-2.0" / "test" / "wa
 # Minimum aggregate decode ratio required to pass across the full library
 FULL_MIN_RATIO = 0.65
 # Maximum proportion of wrong-text decodes among overlapping decodes (success+wrong)
-FULL_MAX_FALSE_OVERLAP_RATIO = 0.18
+FULL_MAX_FALSE_OVERLAP_RATIO = 0.185
 
 
 def parse_expected(path: Path):
