@@ -174,8 +174,8 @@ run_tests() {
   unset WSJTX_BIN_DIR || true
   export WSJTX_BIN_DIR="$BIN_DIR"
   log "Using WSJTX_BIN_DIR=$WSJTX_BIN_DIR"
-  log "Running pytest"
-  pytest -q
+  log "Running pytest (verbose, durations, show skip reasons)"
+  pytest -vv -ra --durations=25
   deactivate || true
 }
 
@@ -233,8 +233,11 @@ USAGE
   log "Activate venv with: source $VENV_DIR/bin/activate"
   log "WSJT-X binaries directory: $BIN_DIR (export WSJTX_BIN_DIR to override)"
 
-  [[ $do_test -eq 1 ]] && run_tests || true
+  # If tests are requested, run them and honor their exit code so CI fails
+  # when pytest reports failures or errors.
+  if [[ $do_test -eq 1 ]]; then
+    run_tests
+  fi
 }
 
 main "$@"
-
