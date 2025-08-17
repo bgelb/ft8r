@@ -174,8 +174,8 @@ run_tests() {
   unset WSJTX_BIN_DIR || true
   export WSJTX_BIN_DIR="$BIN_DIR"
   log "Using WSJTX_BIN_DIR=$WSJTX_BIN_DIR"
-  log "Running pytest"
-  pytest -q
+  log "Running pytest (verbose, durations, show skip reasons)"
+  pytest -vv -ra --durations=25
   deactivate || true
 }
 
