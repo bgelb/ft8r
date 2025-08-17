@@ -1,10 +1,14 @@
 name: CI
 
-on:
-  push:
-    branches: [ main, "**" ]
-  pull_request:
-    branches: [ main ]
+# Run on all pushes and pull requests. Limiting to main can
+# accidentally skip runs for non-main PR targets.
+on: [push, pull_request]
+
+# Allow posting a PR comment while keeping other scopes minimal.
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
 
 jobs:
   test:
