@@ -34,46 +34,160 @@ jobs:
           bash scripts/setup_env.sh --test
 
       - name: Read short regression metrics
-        id: metrics
+        if: always()
+        id: metrics_short
         run: |
           set -euo pipefail
           FILE=".tmp/ft8r_short_metrics.json"
           if [[ -f "$FILE" ]]; then
-            matched=$(jq -r '.matched' "$FILE")
-            total=$(jq -r '.total' "$FILE")
-            percent=$(jq -r '.percent' "$FILE")
+            total_decodes=$(jq -r '.total_decodes' "$FILE")
+            correct_decodes=$(jq -r '.correct_decodes' "$FILE")
+            false_decodes=$(jq -r '.false_decodes' "$FILE")
+            total_signals=$(jq -r '.total_signals' "$FILE")
+            decode_rate=$(jq -r '.decode_rate' "$FILE")
+            false_decode_rate=$(jq -r '.false_decode_rate' "$FILE")
           else
             echo "Metrics file not found at $FILE"
-            matched=0; total=0; percent=0
+            total_decodes=; correct_decodes=; false_decodes=; total_signals=; decode_rate=; false_decode_rate=
           fi
-          echo "matched=$matched" >> "$GITHUB_OUTPUT"
-          echo "total=$total" >> "$GITHUB_OUTPUT"
-          printf "percent=%.1f\n" "$percent" >> "$GITHUB_OUTPUT"
+          echo "total_decodes=$total_decodes" >> "$GITHUB_OUTPUT"
+          echo "correct_decodes=$correct_decodes" >> "$GITHUB_OUTPUT"
+          echo "false_decodes=$false_decodes" >> "$GITHUB_OUTPUT"
+          echo "total_signals=$total_signals" >> "$GITHUB_OUTPUT"
+          echo "decode_rate=$decode_rate" >> "$GITHUB_OUTPUT"
+          echo "false_decode_rate=$false_decode_rate" >> "$GITHUB_OUTPUT"
+          if [[ -f "$FILE" ]]; then
+            duration_sec=$(jq -r '.duration_sec' "$FILE")
+            echo "duration_sec=$duration_sec" >> "$GITHUB_OUTPUT"
+            num_files=$(jq -r '.num_files' "$FILE")
+            avg_runtime=$(jq -r '.avg_runtime_per_file_sec' "$FILE")
+            echo "num_files=$num_files" >> "$GITHUB_OUTPUT"
+            echo "avg_runtime=$avg_runtime" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Comment decode rate on PR
-        if: github.event_name == 'pull_request'
+      - name: Read full regression metrics
+        if: always()
+        id: metrics_full
+        run: |
+          set -euo pipefail
+          FILE=".tmp/ft8r_full_metrics.json"
+          if [[ -f "$FILE" ]]; then
+            total_decodes=$(jq -r '.total_decodes' "$FILE")
+            correct_decodes=$(jq -r '.correct_decodes' "$FILE")
+            false_decodes=$(jq -r '.false_decodes' "$FILE")
+            total_signals=$(jq -r '.total_signals' "$FILE")
+            decode_rate=$(jq -r '.decode_rate' "$FILE")
+            false_decode_rate=$(jq -r '.false_decode_rate' "$FILE")
+          else
+            total_decodes=; correct_decodes=; false_decodes=; total_signals=; decode_rate=; false_decode_rate=
+          fi
+          echo "total_decodes=$total_decodes" >> "$GITHUB_OUTPUT"
+          echo "correct_decodes=$correct_decodes" >> "$GITHUB_OUTPUT"
+          echo "false_decodes=$false_decodes" >> "$GITHUB_OUTPUT"
+          echo "total_signals=$total_signals" >> "$GITHUB_OUTPUT"
+          echo "decode_rate=$decode_rate" >> "$GITHUB_OUTPUT"
+          echo "false_decode_rate=$false_decode_rate" >> "$GITHUB_OUTPUT"
+          if [[ -f "$FILE" ]]; then
+            duration_sec=$(jq -r '.duration_sec' "$FILE")
+            echo "duration_sec=$duration_sec" >> "$GITHUB_OUTPUT"
+            num_files=$(jq -r '.num_files' "$FILE")
+            avg_runtime=$(jq -r '.avg_runtime_per_file_sec' "$FILE")
+            echo "num_files=$num_files" >> "$GITHUB_OUTPUT"
+            echo "avg_runtime=$avg_runtime" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment decode metrics on PR
+        if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         env:
-          MATCHED: ${{ steps.metrics.outputs.matched }}
-          TOTAL: ${{ steps.metrics.outputs.total }}
-          PERCENT: ${{ steps.metrics.outputs.percent }}
+          SHORT_TOTAL_DECODES: ${{ steps.metrics_short.outputs.total_decodes }}
+          SHORT_CORRECT_DECODES: ${{ steps.metrics_short.outputs.correct_decodes }}
+          SHORT_FALSE_DECODES: ${{ steps.metrics_short.outputs.false_decodes }}
+          SHORT_TOTAL_SIGNALS: ${{ steps.metrics_short.outputs.total_signals }}
+          SHORT_DECODE_RATE: ${{ steps.metrics_short.outputs.decode_rate }}
+          SHORT_FALSE_DECODE_RATE: ${{ steps.metrics_short.outputs.false_decode_rate }}
+          SHORT_DURATION_SEC: ${{ steps.metrics_short.outputs.duration_sec }}
+          SHORT_NUM_FILES: ${{ steps.metrics_short.outputs.num_files }}
+          SHORT_AVG_RUNTIME: ${{ steps.metrics_short.outputs.avg_runtime }}
+          FULL_TOTAL_DECODES: ${{ steps.metrics_full.outputs.total_decodes }}
+          FULL_CORRECT_DECODES: ${{ steps.metrics_full.outputs.correct_decodes }}
+          FULL_FALSE_DECODES: ${{ steps.metrics_full.outputs.false_decodes }}
+          FULL_TOTAL_SIGNALS: ${{ steps.metrics_full.outputs.total_signals }}
+          FULL_DECODE_RATE: ${{ steps.metrics_full.outputs.decode_rate }}
+          FULL_FALSE_DECODE_RATE: ${{ steps.metrics_full.outputs.false_decode_rate }}
+          FULL_DURATION_SEC: ${{ steps.metrics_full.outputs.duration_sec }}
+          FULL_NUM_FILES: ${{ steps.metrics_full.outputs.num_files }}
+          FULL_AVG_RUNTIME: ${{ steps.metrics_full.outputs.avg_runtime }}
         with:
           script: |
-            const marker = '<!-- ft8r-short-metrics -->';
-            const total = parseInt(process.env.TOTAL || '0', 10);
-            const matched = parseInt(process.env.MATCHED || '0', 10);
-            const percent = process.env.PERCENT || '0.0';
-            let body;
-            if (total > 0) {
-              body = `${marker}
-              **FT8R Short Regression Decode Rate**
-              - Raw: ${matched}/${total}
-              - Percent: ${percent}%`;
-            } else {
-              body = `${marker}
-              **FT8R Short Regression Decode Rate**
-              - No short regression metrics were produced in this run.`;
+            const marker = '<!-- ft8r-metrics -->';
+            function fmtSection(title, env) {
+              const td = env.TOTAL_DECODES;
+              const cd = env.CORRECT_DECODES;
+              const fd = env.FALSE_DECODES;
+              const ts = env.TOTAL_SIGNALS;
+              const dr = env.DECODE_RATE;
+              const fdr = env.FALSE_DECODE_RATE;
+              const dur = env.DURATION_SEC;
+              const nf = env.NUM_FILES;
+              const avg = env.AVG_RUNTIME;
+              if (!td || !cd || !fd || !ts || !dr || !fdr) {
+                return `**${title}**\n- NOT RUN`;
+              }
+              const tdi = parseInt(td,10);
+              const cdi = parseInt(cd,10);
+              const fdi = parseInt(fd,10);
+              const tsi = parseInt(ts,10);
+              const drp = (parseFloat(dr)*100).toFixed(1);
+              const fdrp = (parseFloat(fdr)*100).toFixed(2);
+              const durS = dur ? `${parseFloat(dur).toFixed(1)}s` : 'N/A';
+              const nfi = nf ? parseInt(nf,10) : NaN;
+              let avgS = 'N/A';
+              if (avg) {
+                avgS = `${parseFloat(avg).toFixed(2)}s`;
+              } else if (dur && nf) {
+                const val = parseFloat(dur) / parseInt(nf,10);
+                if (isFinite(val)) avgS = `${val.toFixed(2)}s`;
+              }
+              return `**${title}**
+              - total decodes: ${tdi}
+              - correct decodes: ${cdi}
+              - false decodes: ${fdi}
+              - total signals: ${tsi}
+              - total samples: ${isNaN(nfi) ? 'N/A' : nfi}
+              - decode rate: ${drp}%
+              - false decode rate: ${fdrp}%
+              - runtime: ${durS}
+              - avg runtime per 15s WAV: ${avgS}`;
             }
+            const shortEnv = {
+              TOTAL_DECODES: process.env.SHORT_TOTAL_DECODES,
+              CORRECT_DECODES: process.env.SHORT_CORRECT_DECODES,
+              FALSE_DECODES: process.env.SHORT_FALSE_DECODES,
+              TOTAL_SIGNALS: process.env.SHORT_TOTAL_SIGNALS,
+              DECODE_RATE: process.env.SHORT_DECODE_RATE,
+              FALSE_DECODE_RATE: process.env.SHORT_FALSE_DECODE_RATE,
+              DURATION_SEC: process.env.SHORT_DURATION_SEC,
+              NUM_FILES: process.env.SHORT_NUM_FILES,
+              AVG_RUNTIME: process.env.SHORT_AVG_RUNTIME,
+            };
+            const fullEnv = {
+              TOTAL_DECODES: process.env.FULL_TOTAL_DECODES,
+              CORRECT_DECODES: process.env.FULL_CORRECT_DECODES,
+              FALSE_DECODES: process.env.FULL_FALSE_DECODES,
+              TOTAL_SIGNALS: process.env.FULL_TOTAL_SIGNALS,
+              DECODE_RATE: process.env.FULL_DECODE_RATE,
+              FALSE_DECODE_RATE: process.env.FULL_FALSE_DECODE_RATE,
+              DURATION_SEC: process.env.FULL_DURATION_SEC,
+              NUM_FILES: process.env.FULL_NUM_FILES,
+              AVG_RUNTIME: process.env.FULL_AVG_RUNTIME,
+            };
+            const body = [
+              marker,
+              fmtSection('Short Sample WAVs', shortEnv),
+              '',
+              fmtSection('Full Sample WAVs', fullEnv),
+            ].join('\n');
             const {owner, repo} = context.repo;
             const issue_number = context.issue.number;
             const {data: comments} = await github.rest.issues.listComments({owner, repo, issue_number, per_page: 100});

@@ -19,7 +19,6 @@ from utils import (
 
 from search import find_candidates
 from utils.prof import PROFILER
-from utils.ldpc_colorder import COLORDER_174  # available for future reference
 import os
 
 # Symbol positions occupied by the three 7-symbol Costas sequences.
@@ -81,6 +80,10 @@ _ENV_MAX = os.getenv("FT8R_MAX_CANDIDATES", "").strip()
 _MAX_CANDIDATES = 1500 if _ENV_MAX == "" else int(_ENV_MAX)
 _DISABLE_LEGACY = os.getenv("FT8R_DISABLE_LEGACY", "0") not in ("0", "", "false", "False")
 _RUN_BOTH_ALIGNMENTS = os.getenv("FT8R_RUN_BOTH", "1") not in ("0", "false", "False")
+# Allow bypassing CRC gating for troubleshooting only. Defaults to disabled.
+_ALLOW_CRC_FAIL = os.getenv("FT8R_ALLOW_CRC_FAIL", "0") not in ("0", "", "false", "False")
+# Column reordering around LDPC is not used; H columns match transmitted order.
+# Optional debug: include raw decoded bits and parity/CRC flags in results
 # Offset of the band edges relative to ``freq`` expressed in tone spacings.
 # ``freq`` corresponds to tone 0 so the bottom edge lies 1.5 tone spacings
 # below it and the top edge is ``SLICE_SPAN_TONES - 1.5`` spacings above.
@@ -100,6 +103,8 @@ def _prepare_full_fft(samples_in: RealSamples):
         full_fft = np.fft.rfft(audio)
     bin_spacing_hz = sample_rate / full_fft_len
     return full_fft, bin_spacing_hz, full_fft_len
+
+
 
 
 def downsample_to_baseband(
@@ -446,6 +451,11 @@ def ldpc_decode(llrs: np.ndarray) -> str:
     with PROFILER.section("ldpc.decode"):
         err_est = _LDPC_DECODER.decode(syndrome)
     corrected = np.bitwise_xor(err_est.astype(np.uint8), hard)
+    # Optional development-time parity assertion to verify decoder correctness
+    if os.getenv("FT8R_ASSERT_PARITY", "0") not in ("0", "", "false", "False"):
+        syn2 = (LDPC_174_91_H @ corrected) % 2
+        if int(syn2.sum()) != 0:
+            raise AssertionError("LDPC decode produced non-zero parity syndrome")
     bits = "".join("1" if b else "0" for b in corrected.astype(int))
     return bits
 
@@ -453,7 +463,7 @@ def ldpc_decode(llrs: np.ndarray) -> str:
 # No CRC-guided flipping: only structurally correct mapping is used.
 
 
-def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
+def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, include_bits: bool = False):
     """Decode all FT8 signals present in ``samples_in``.
 
     The audio is searched for Costas sync peaks and every candidate above
@@ -524,14 +534,19 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
                 with PROFILER.section("ldpc.total"):
                     decoded_bits = ldpc_decode(llrs)
                 method = "ldpc"
-            text = decode77(decoded_bits[:77])
-            results.append({
-                "message": text,
-                "score": score,
-                "freq": freq_f,
-                "dt": dt_f,
-                "method": method,
-            })
+            # Enforce CRC gating after LDPC/hard decision
+            if _ALLOW_CRC_FAIL or check_crc(decoded_bits):
+                text = decode77(decoded_bits[:77])
+                rec = {
+                    "message": text,
+                    "score": score,
+                    "freq": freq_f,
+                    "dt": dt_f,
+                    "method": method,
+                }
+                if include_bits:
+                    rec["bits"] = decoded_bits
+                results.append(rec)
             decoded_any = True
         except Exception:
             decoded_any = False
@@ -554,14 +569,19 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
                     with PROFILER.section("ldpc.total"):
                         decoded_bits = ldpc_decode(llrs)
                     method = "ldpc"
-                text = decode77(decoded_bits[:77])
-                results.append({
-                    "message": text,
-                    "score": score,
-                    "freq": freq_f,
-                    "dt": dt_f,
-                    "method": method,
-                })
+                # Enforce CRC gating after LDPC/hard decision
+                if _ALLOW_CRC_FAIL or check_crc(decoded_bits):
+                    text = decode77(decoded_bits[:77])
+                    rec = {
+                        "message": text,
+                        "score": score,
+                        "freq": freq_f,
+                        "dt": dt_f,
+                        "method": method,
+                    }
+                    if include_bits:
+                        rec["bits"] = decoded_bits
+                    results.append(rec)
             except Exception:
                 pass
 

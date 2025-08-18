@@ -5,6 +5,7 @@ import numpy as np
 from .decode import decode77, register_callsign, ihashcall
 
 from .ldpc_matrix import LDPC_174_91_H
+from .ft8_crc_matrix import CRC14_IDXS
 
 # Order of tones forming the 7-symbol Costas sync sequence.  Each value
 # is the tone index (0-7) transmitted for one of the seven sync symbols.
@@ -29,27 +30,31 @@ FT8_SYMBOL_LENGTH_IN_SEC = 1.0 / TONE_SPACING_IN_HZ
 FT8_SYMBOLS_PER_MESSAGE = 79
 
 
-# 14-bit CRC used by FT8; polynomial chosen to match ft8code bit ordering
-CRC_POLY = 0x21F2
+# WSJT-X compatible CRC-14 implemented via a precomputed linear mapping.
 
 
 def calc_crc(bits: str) -> int:
-    """Return the 14-bit CRC of ``bits``.
+    """Return the 14-bit WSJT-X FT8 CRC for the 77-bit payload ``bits``.
 
-    The bit order matches that produced by ``ft8code`` and
-    :func:`demod.naive_demod`.
+    This implementation uses a precomputed GF(2) linear mapping derived from
+    WSJT-X (``ft8code``) outputs, ensuring exact compatibility across all
+    message types without requiring WSJT-X at runtime.
     """
-    crc = 0
-    for b in bits:
-        feedback = (crc & 1) ^ (b == "1")
-        crc >>= 1
-        if feedback:
-            crc ^= CRC_POLY
-    return crc
+    if len(bits) != 77:
+        raise ValueError("bits must contain 77 bits")
+    x = [1 if ch == "1" else 0 for ch in bits]
+    x.append(1)  # constant term
+    out = 0
+    for k, idxs in enumerate(CRC14_IDXS):
+        s = 0
+        for j in idxs:
+            s ^= x[j]
+        out = (out << 1) | s
+    return out
 
 
 def check_crc(bitstring: str) -> bool:
-    """Validate the CRC embedded in a 174-bit FT8 payload."""
+    """Validate the CRC embedded in a 174-bit FT8 payload (WSJT-X compatible)."""
     if len(bitstring) != 174:
         raise ValueError("bitstring must contain 174 bits")
     msg_bits = bitstring[:77]

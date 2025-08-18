@@ -29,7 +29,9 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     # Persist for CI to parse
     out_dir = Path(".tmp")
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "ft8r_short_metrics.json").write_text(
-        json.dumps({"matched": matched, "total": total, "percent": percent}, indent=2)
-    )
-
+    # If detailed metrics were written by the test, don't overwrite them.
+    out_file = out_dir / "ft8r_short_metrics.json"
+    if not out_file.exists():
+        out_file.write_text(
+            json.dumps({"matched": matched, "total": total, "percent": percent}, indent=2)
+        )
