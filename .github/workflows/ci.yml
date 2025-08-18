@@ -34,6 +34,7 @@ jobs:
           bash scripts/setup_env.sh --test
 
       - name: Read short regression metrics
+        if: always()
         id: metrics_short
         run: |
           set -euo pipefail
@@ -61,6 +62,7 @@ jobs:
           fi
 
       - name: Read full regression metrics
+        if: always()
         id: metrics_full
         run: |
           set -euo pipefail
@@ -87,7 +89,7 @@ jobs:
           fi
 
       - name: Comment decode metrics on PR
-        if: github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         env:
           SHORT_TOTAL_DECODES: ${{ steps.metrics_short.outputs.total_decodes }}
