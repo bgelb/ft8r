@@ -463,7 +463,7 @@ def ldpc_decode(llrs: np.ndarray) -> str:
 # No CRC-guided flipping: only structurally correct mapping is used.
 
 
-def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
+def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, include_bits: bool = False):
     """Decode all FT8 signals present in ``samples_in``.
 
     The audio is searched for Costas sync peaks and every candidate above
@@ -544,6 +544,8 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
                     "dt": dt_f,
                     "method": method,
                 }
+                if include_bits:
+                    rec["bits"] = decoded_bits
                 results.append(rec)
             decoded_any = True
         except Exception:
@@ -577,6 +579,8 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
                         "dt": dt_f,
                         "method": method,
                     }
+                    if include_bits:
+                        rec["bits"] = decoded_bits
                     results.append(rec)
             except Exception:
                 pass

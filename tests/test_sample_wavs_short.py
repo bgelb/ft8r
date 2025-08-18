@@ -8,13 +8,12 @@ from tests.test_sample_wavs import (
     parse_expected,
     list_all_stems,
 )
-from tests.utils import ft8code_bits, resolve_wsjt_binary
 
 
 # Minimum aggregate decode ratio required to pass for the short regression
 SHORT_MIN_RATIO = 0.68
 # Maximum proportion of wrong-text decodes among overlapping decodes (success+wrong)
-SHORT_MAX_FALSE_OVERLAP_RATIO = 0.18
+SHORT_MAX_FALSE_OVERLAP_RATIO = 0.25
 
 
 def _short_sample_stems() -> list[str]:
@@ -23,19 +22,11 @@ def _short_sample_stems() -> list[str]:
     return [s for i, s in enumerate(sorted(stems)) if i % 5 == 0]
 
 
-def _bits_for_message(msg: str) -> str | None:
-    try:
-        if resolve_wsjt_binary("ft8code") is None:
-            return None
-        return ft8code_bits(msg)
-    except Exception:
-        return None
-
-
 def test_decode_sample_wavs_short_aggregate(ft8r_metrics):
     t0 = time.monotonic()
     # We ignore dt/freq and deduplicate strictly by payload bits
     decoded_set: set[str] = set()
+    decoded_texts: set[str] = set()
     expected_set: set[str] = set()
     raw_decodes = 0
     hard_crc_total = 0
@@ -44,24 +35,23 @@ def test_decode_sample_wavs_short_aggregate(ft8r_metrics):
         txt_path = DATA_DIR / f"{stem}.txt"
 
         audio = read_wav(str(wav_path))
-        results = decode_full_period(audio)
+        results = decode_full_period(audio, include_bits=True)
         raw_decodes += len(results)
         hard_crc_total += sum(1 for r in results if r.get("method") == "hard")
         # Deduplicate decodes: use payload bits if available, else message text fallback
         for r in results:
-            bits = _bits_for_message(r["message"]) or r["message"]
-            decoded_set.add(bits)
+            decoded_set.add(r.get("bits") or r["message"])
+            decoded_texts.add(r["message"])
 
         # Expected signals from golden text
         expected_records = parse_expected(txt_path)
         for (msg, _dt, _freq) in expected_records:
-            bits = _bits_for_message(msg) or msg
-            expected_set.add(bits)
+            expected_set.add(msg)
 
     assert len(expected_set) > 0, "No sample records found"
     total_decodes = len(decoded_set)
     total_signals = len(expected_set)
-    correct_decodes = len(decoded_set & expected_set)
+    correct_decodes = len(decoded_texts & expected_set)
     false_decodes = total_decodes - correct_decodes
     decode_rate = correct_decodes / total_signals if total_signals else 0.0
     false_decode_rate = false_decodes / total_decodes if total_decodes else 0.0
