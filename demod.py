@@ -84,26 +84,6 @@ _RUN_BOTH_ALIGNMENTS = os.getenv("FT8R_RUN_BOTH", "1") not in ("0", "false", "Fa
 _ALLOW_CRC_FAIL = os.getenv("FT8R_ALLOW_CRC_FAIL", "0") not in ("0", "", "false", "False")
 # Column reordering around LDPC is not used; H columns match transmitted order.
 # Optional debug: include raw decoded bits and parity/CRC flags in results
-_DEBUG_BITS = os.getenv("FT8R_DEBUG_BITS", "0") not in ("0", "", "false", "False")
-try:
-    _DEBUG_DT = float(os.getenv("FT8R_DEBUG_DT", ""))
-except Exception:
-    _DEBUG_DT = None
-try:
-    _DEBUG_DTW = float(os.getenv("FT8R_DEBUG_DTW", "0.05"))
-except Exception:
-    _DEBUG_DTW = 0.05
-try:
-    _DEBUG_FREQ = float(os.getenv("FT8R_DEBUG_FREQ", ""))
-except Exception:
-    _DEBUG_FREQ = None
-try:
-    _DEBUG_FREQW = float(os.getenv("FT8R_DEBUG_FREQW", "10.0"))
-except Exception:
-    _DEBUG_FREQW = 10.0
-_DEBUG_MSG_SUBSTR = os.getenv("FT8R_DEBUG_MSG_SUBSTR", "").strip()
-if _DEBUG_MSG_SUBSTR == "":
-    _DEBUG_MSG_SUBSTR = None
 # Offset of the band edges relative to ``freq`` expressed in tone spacings.
 # ``freq`` corresponds to tone 0 so the bottom edge lies 1.5 tone spacings
 # below it and the top edge is ``SLICE_SPAN_TONES - 1.5`` spacings above.
@@ -125,43 +105,6 @@ def _prepare_full_fft(samples_in: RealSamples):
     return full_fft, bin_spacing_hz, full_fft_len
 
 
-def _should_debug_bits(dt: float, freq: float, message: str) -> bool:
-    if not _DEBUG_BITS:
-        return False
-    if _DEBUG_DT is not None and abs(dt - _DEBUG_DT) > _DEBUG_DTW:
-        return False
-    if _DEBUG_FREQ is not None and abs(freq - _DEBUG_FREQ) > _DEBUG_FREQW:
-        return False
-    if _DEBUG_MSG_SUBSTR is not None and _DEBUG_MSG_SUBSTR.lower() not in message.lower():
-        return False
-    return True
-
-
-def _attach_bit_debug(rec: dict, decoded_bits: str, *, hard_bits: str | None = None) -> dict:
-    if not _DEBUG_BITS:
-        return rec
-    try:
-        vec = np.fromiter((1 if c == "1" else 0 for c in decoded_bits[:174]), dtype=np.uint8)
-        syn = (LDPC_174_91_H @ vec) % 2
-        parity_ok = int(syn.sum()) == 0
-        out = dict(rec)
-        out.update(
-            {
-                "bits": decoded_bits[:174],
-                "crc_ok": bool(check_crc(decoded_bits)),
-                "parity_ok": bool(parity_ok),
-                "syndrome_weight": int(syn.sum()),
-            }
-        )
-        if hard_bits is not None:
-            try:
-                out["hard_bits"] = hard_bits[:174]
-                out["hard_crc_ok"] = bool(check_crc(hard_bits))
-            except Exception:
-                pass
-        return out
-    except Exception:
-        return rec
 
 
 def downsample_to_baseband(
@@ -601,8 +544,6 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
                     "dt": dt_f,
                     "method": method,
                 }
-                if _should_debug_bits(dt_f, freq_f, text):
-                    rec = _attach_bit_debug(rec, decoded_bits, hard_bits=hard_bits)
                 results.append(rec)
             decoded_any = True
         except Exception:
@@ -636,8 +577,6 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0):
                         "dt": dt_f,
                         "method": method,
                     }
-                    if _should_debug_bits(dt_f, freq_f, text):
-                        rec = _attach_bit_debug(rec, decoded_bits, hard_bits=hard_bits)
                     results.append(rec)
             except Exception:
                 pass
