@@ -1,4 +1,5 @@
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -92,6 +93,7 @@ def list_all_stems() -> list[str]:
 
 
 def test_decode_sample_wavs_aggregate():
+    t0 = time.monotonic()
     matched_total = 0
     expected_total = 0
     wrong_total = 0
@@ -142,6 +144,7 @@ def test_decode_sample_wavs_aggregate():
         total_signals = int(expected_total)
         decode_rate = (correct_decodes / total_signals) if total_signals else 0.0
         false_decode_rate = (false_decodes / total_decodes) if total_decodes else 0.0
+        duration_sec = time.monotonic() - t0
         with open(".tmp/ft8r_full_metrics.json", "w") as f:
             json.dump({
                 "total_decodes": total_decodes,
@@ -150,6 +153,7 @@ def test_decode_sample_wavs_aggregate():
                 "total_signals": total_signals,
                 "decode_rate": decode_rate,
                 "false_decode_rate": false_decode_rate,
+                "duration_sec": duration_sec,
             }, f, indent=2)
     except Exception:
         pass

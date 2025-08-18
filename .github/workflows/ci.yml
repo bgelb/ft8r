@@ -55,6 +55,10 @@ jobs:
           echo "total_signals=$total_signals" >> "$GITHUB_OUTPUT"
           echo "decode_rate=$decode_rate" >> "$GITHUB_OUTPUT"
           echo "false_decode_rate=$false_decode_rate" >> "$GITHUB_OUTPUT"
+          if [[ -f "$FILE" ]]; then
+            duration_sec=$(jq -r '.duration_sec' "$FILE")
+            echo "duration_sec=$duration_sec" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Read full regression metrics
         id: metrics_full
@@ -77,6 +81,10 @@ jobs:
           echo "total_signals=$total_signals" >> "$GITHUB_OUTPUT"
           echo "decode_rate=$decode_rate" >> "$GITHUB_OUTPUT"
           echo "false_decode_rate=$false_decode_rate" >> "$GITHUB_OUTPUT"
+          if [[ -f "$FILE" ]]; then
+            duration_sec=$(jq -r '.duration_sec' "$FILE")
+            echo "duration_sec=$duration_sec" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Comment decode metrics on PR
         if: github.event_name == 'pull_request'
@@ -88,12 +96,14 @@ jobs:
           SHORT_TOTAL_SIGNALS: ${{ steps.metrics_short.outputs.total_signals }}
           SHORT_DECODE_RATE: ${{ steps.metrics_short.outputs.decode_rate }}
           SHORT_FALSE_DECODE_RATE: ${{ steps.metrics_short.outputs.false_decode_rate }}
+          SHORT_DURATION_SEC: ${{ steps.metrics_short.outputs.duration_sec }}
           FULL_TOTAL_DECODES: ${{ steps.metrics_full.outputs.total_decodes }}
           FULL_CORRECT_DECODES: ${{ steps.metrics_full.outputs.correct_decodes }}
           FULL_FALSE_DECODES: ${{ steps.metrics_full.outputs.false_decodes }}
           FULL_TOTAL_SIGNALS: ${{ steps.metrics_full.outputs.total_signals }}
           FULL_DECODE_RATE: ${{ steps.metrics_full.outputs.decode_rate }}
           FULL_FALSE_DECODE_RATE: ${{ steps.metrics_full.outputs.false_decode_rate }}
+          FULL_DURATION_SEC: ${{ steps.metrics_full.outputs.duration_sec }}
         with:
           script: |
             const marker = '<!-- ft8r-metrics -->';
@@ -104,6 +114,7 @@ jobs:
               const ts = env.TOTAL_SIGNALS;
               const dr = env.DECODE_RATE;
               const fdr = env.FALSE_DECODE_RATE;
+              const dur = env.DURATION_SEC;
               if (!td || !cd || !fd || !ts || !dr || !fdr) {
                 return `**${title}**\n- NOT RUN`;
               }
@@ -113,13 +124,15 @@ jobs:
               const tsi = parseInt(ts,10);
               const drp = (parseFloat(dr)*100).toFixed(1);
               const fdrp = (parseFloat(fdr)*100).toFixed(2);
+              const durS = dur ? `${parseFloat(dur).toFixed(1)}s` : 'N/A';
               return `**${title}**
               - total decodes: ${tdi}
               - correct decodes: ${cdi}
               - false decodes: ${fdi}
               - total signals: ${tsi}
               - decode rate: ${drp}%
-              - false decode rate: ${fdrp}%`;
+              - false decode rate: ${fdrp}%
+              - runtime: ${durS}`;
             }
             const shortEnv = {
               TOTAL_DECODES: process.env.SHORT_TOTAL_DECODES,
@@ -128,6 +141,7 @@ jobs:
               TOTAL_SIGNALS: process.env.SHORT_TOTAL_SIGNALS,
               DECODE_RATE: process.env.SHORT_DECODE_RATE,
               FALSE_DECODE_RATE: process.env.SHORT_FALSE_DECODE_RATE,
+              DURATION_SEC: process.env.SHORT_DURATION_SEC,
             };
             const fullEnv = {
               TOTAL_DECODES: process.env.FULL_TOTAL_DECODES,
@@ -136,6 +150,7 @@ jobs:
               TOTAL_SIGNALS: process.env.FULL_TOTAL_SIGNALS,
               DECODE_RATE: process.env.FULL_DECODE_RATE,
               FALSE_DECODE_RATE: process.env.FULL_FALSE_DECODE_RATE,
+              DURATION_SEC: process.env.FULL_DURATION_SEC,
             };
             const body = `${marker}
 ${fmtSection('Short Sample WAVs', shortEnv)}
