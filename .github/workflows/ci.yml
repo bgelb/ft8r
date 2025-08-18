@@ -154,10 +154,12 @@ jobs:
               FALSE_DECODE_RATE: process.env.FULL_FALSE_DECODE_RATE,
               DURATION_SEC: process.env.FULL_DURATION_SEC,
             };
-            const body = `${marker}
-${fmtSection('Short Sample WAVs', shortEnv)}
-
-${fmtSection('Full Sample WAVs', fullEnv)}`;
+            const body = [
+              marker,
+              fmtSection('Short Sample WAVs', shortEnv),
+              '',
+              fmtSection('Full Sample WAVs', fullEnv),
+            ].join('\n');
             const {owner, repo} = context.repo;
             const issue_number = context.issue.number;
             const {data: comments} = await github.rest.issues.listComments({owner, repo, issue_number, per_page: 100});
