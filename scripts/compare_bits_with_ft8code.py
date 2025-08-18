@@ -38,7 +38,8 @@ def main(short: bool) -> int:
                 want_bits = ft8code_bits(msg)
             except Exception as e:
                 continue
-            if want_bits == got_bits:
+            # Compare only the first 91 bits (message+CRC) for equivalence
+            if want_bits[:91] == (got_bits or '')[:91]:
                 matched += 1
             else:
                 mismatches.append((stem, msg, got_bits, want_bits))
@@ -52,4 +53,3 @@ def main(short: bool) -> int:
 if __name__ == "__main__":
     short = "--short" in sys.argv
     raise SystemExit(main(short))
-

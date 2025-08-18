@@ -16,7 +16,6 @@ from utils import (
     check_crc,
     decode77,
 )
-from utils.ldpc_encode import compute_parity_bits
 
 from search import find_candidates
 from utils.prof import PROFILER
@@ -537,14 +536,6 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
                 method = "ldpc"
             # Enforce CRC gating after LDPC/hard decision
             if _ALLOW_CRC_FAIL or check_crc(decoded_bits):
-                # Re-encode parity bits to canonical values to ensure parity-zero codeword
-                # and match WSJT-X bit layout.
-                try:
-                    info = decoded_bits[:91]
-                    par = compute_parity_bits(info)
-                    decoded_bits = info + "".join('1' if b else '0' for b in par)
-                except Exception:
-                    pass
                 text = decode77(decoded_bits[:77])
                 rec = {
                     "message": text,
@@ -580,12 +571,6 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
                     method = "ldpc"
                 # Enforce CRC gating after LDPC/hard decision
                 if _ALLOW_CRC_FAIL or check_crc(decoded_bits):
-                    try:
-                        info = decoded_bits[:91]
-                        par = compute_parity_bits(info)
-                        decoded_bits = info + "".join('1' if b else '0' for b in par)
-                    except Exception:
-                        pass
                     text = decode77(decoded_bits[:77])
                     rec = {
                         "message": text,
