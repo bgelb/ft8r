@@ -99,9 +99,8 @@ def _bits_for_message(msg: str) -> str | None:
 
 def test_decode_sample_wavs_aggregate():
     t0 = time.monotonic()
-    decoded_set: set[str] = set()
+    decoded_map: dict[str, str] = {}
     expected_set: set[str] = set()
-    decoded_texts: set[str] = set()
     raw_decodes = 0
     hard_crc_total = 0
     stems = list_all_stems()
@@ -115,17 +114,17 @@ def test_decode_sample_wavs_aggregate():
         raw_decodes += len(results)
         hard_crc_total += sum(1 for r in results if r.get("method") == "hard")
         for r in results:
-            decoded_set.add(r.get("bits") or r["message"])
-            decoded_texts.add(r["message"]) 
+            key = r.get("bits") or r["message"]
+            decoded_map.setdefault(key, r["message"])  # keep first text
 
         expected_records = parse_expected(txt_path)
         for (msg, _dt, _freq) in expected_records:
             expected_set.add(msg)
 
     assert len(expected_set) > 0, "No sample records found"
-    total_decodes = len(decoded_set)
+    total_decodes = len(decoded_map)
     total_signals = len(expected_set)
-    correct_decodes = len(decoded_texts & expected_set)
+    correct_decodes = sum(1 for txt in decoded_map.values() if txt in expected_set)
     false_decodes = total_decodes - correct_decodes
     decode_rate = correct_decodes / total_signals if total_signals else 0.0
     false_decode_rate = false_decodes / total_decodes if total_decodes else 0.0
