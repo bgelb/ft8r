@@ -30,7 +30,8 @@ def test_decode_sample_wavs_short_aggregate(ft8r_metrics):
     expected_set: set[str] = set()
     raw_decodes = 0
     hard_crc_total = 0
-    for stem in _short_sample_stems():
+    stems = _short_sample_stems()
+    for stem in stems:
         wav_path = DATA_DIR / f"{stem}.wav"
         txt_path = DATA_DIR / f"{stem}.txt"
 
@@ -70,6 +71,8 @@ def test_decode_sample_wavs_short_aggregate(ft8r_metrics):
         import json, os
         os.makedirs(".tmp", exist_ok=True)
         duration_sec = time.monotonic() - t0
+        num_files = len(stems)
+        avg_runtime = (duration_sec / num_files) if num_files else 0.0
         with open(".tmp/ft8r_short_metrics.json", "w") as f:
             json.dump({
                 "total_decodes": int(total_decodes),
@@ -79,6 +82,8 @@ def test_decode_sample_wavs_short_aggregate(ft8r_metrics):
                 "decode_rate": float(decode_rate),
                 "false_decode_rate": float(false_decode_rate),
                 "duration_sec": float(duration_sec),
+                "num_files": int(num_files),
+                "avg_runtime_per_file_sec": float(avg_runtime),
             }, f, indent=2)
     except Exception:
         pass
