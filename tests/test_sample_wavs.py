@@ -132,3 +132,24 @@ def test_decode_sample_wavs_aggregate():
     assert false_ratio <= FULL_MAX_FALSE_OVERLAP_RATIO, (
         f"False overlap ratio {false_ratio:.3f} > {FULL_MAX_FALSE_OVERLAP_RATIO:.3f}"
     )
+    # Persist detailed metrics for CI PR comment
+    try:
+        import json, os
+        os.makedirs(".tmp", exist_ok=True)
+        total_decodes = int(produced_total)
+        correct_decodes = int(matched_total)
+        false_decodes = int(total_decodes - correct_decodes)
+        total_signals = int(expected_total)
+        decode_rate = (correct_decodes / total_signals) if total_signals else 0.0
+        false_decode_rate = (false_decodes / total_decodes) if total_decodes else 0.0
+        with open(".tmp/ft8r_full_metrics.json", "w") as f:
+            json.dump({
+                "total_decodes": total_decodes,
+                "correct_decodes": correct_decodes,
+                "false_decodes": false_decodes,
+                "total_signals": total_signals,
+                "decode_rate": decode_rate,
+                "false_decode_rate": false_decode_rate,
+            }, f, indent=2)
+    except Exception:
+        pass

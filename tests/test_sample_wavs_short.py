@@ -63,6 +63,27 @@ def test_decode_sample_wavs_short_aggregate(ft8r_metrics):
     ft8r_metrics["total"] += expected_total
     print(f"Short summary: produced={produced_total} expected={expected_total} successful={matched_total} false={wrong_total} hard_crc={hard_crc_total}")
     print(f"Short metrics: coverage_success_ratio={ratio:.3f} success_overlap_ratio={success_overlap_ratio:.3f} false_overlap_ratio={false_ratio:.3f}")
+    # Persist detailed metrics for CI PR comment
+    try:
+        import json, os
+        os.makedirs(".tmp", exist_ok=True)
+        total_decodes = int(produced_total)
+        correct_decodes = int(matched_total)
+        false_decodes = int(total_decodes - correct_decodes)
+        total_signals = int(expected_total)
+        decode_rate = (correct_decodes / total_signals) if total_signals else 0.0
+        false_decode_rate = (false_decodes / total_decodes) if total_decodes else 0.0
+        with open(".tmp/ft8r_short_metrics.json", "w") as f:
+            json.dump({
+                "total_decodes": total_decodes,
+                "correct_decodes": correct_decodes,
+                "false_decodes": false_decodes,
+                "total_signals": total_signals,
+                "decode_rate": decode_rate,
+                "false_decode_rate": false_decode_rate,
+            }, f, indent=2)
+    except Exception:
+        pass
     assert ratio >= SHORT_MIN_RATIO, f"Short aggregate decode ratio {ratio:.3f} < {SHORT_MIN_RATIO:.3f}"
     assert false_ratio <= SHORT_MAX_FALSE_OVERLAP_RATIO, (
         f"Short false overlap ratio {false_ratio:.3f} > {SHORT_MAX_FALSE_OVERLAP_RATIO:.3f}"
