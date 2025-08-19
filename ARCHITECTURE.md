@@ -91,6 +91,9 @@ PYTHONPATH=. FT8R_PROFILE=1 python scripts/profile_decode.py websdr_test6 --json
 - Cache the 16s full‑period FFT once per decode and reuse for baseband slicing.
 - Precompute the fixed edge taper window for FFT slices.
 - Cache zero‑offset tone bases per `(sample_rate, sym_len)` and apply per‑frequency phase shifts for fine frequency sync.
+- Vectorized Costas correlation in candidate search via indexed gathers and sums over the sparse Costas kernels (active and noise), replacing dense 2‑D convolution.
+- Batched fine frequency refinement: compute Costas energies for all sub‑bin frequency hypotheses in one pass using BLAS (batched matmul), then apply parabolic interpolation.
+- Batched fine time refinement: evaluate all integer offsets around `dt` using a compact strided view and a single einsum over the tone bases, then apply parabolic interpolation.
 - Run a single refined alignment path. A fast CRC short‑circuit on hard decisions avoids expensive LDPC when possible.
 
 All changes preserve numerical results; any behavior differences can be gated via environment variables described next.

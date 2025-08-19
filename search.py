@@ -1,6 +1,5 @@
 # Basic candidate search for FT8 Costas sequence
 import numpy as np
-from scipy.signal import correlate2d
 from scipy.ndimage import maximum_filter
 from typing import List, Tuple
 
@@ -11,6 +10,69 @@ from utils import (
     COSTAS_START_OFFSET_SEC,
 )
 from utils.prof import PROFILER
+
+
+def _costas_active_noise_maps(fft_pwr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return (active_map, noise_map) for the Costas correlation.
+
+    Computes the Costas sync correlation using indexed gathers and sums over the
+    sparse Costas kernels instead of dense 2‑D convolution. The result matches
+    correlate2d(..., mode="valid") using the logical active/noise kernels.
+
+    Parameters
+    ----------
+    fft_pwr:
+        2‑D array of shape (num_rows, num_cols) with FFT magnitudes squared for
+        the oversampled time/frequency grid.
+
+    Returns
+    -------
+    (active_map, noise_map):
+        Arrays of shape (R, B) where R is the number of valid starting rows for
+        a 7‑symbol Costas window, and B is the number of base frequency columns.
+    """
+
+    num_rows, num_cols = fft_pwr.shape
+    # Number of valid starting rows for a 7‑symbol Costas window
+    rows_valid = num_rows - _KERNEL_TIME_LEN + 1
+    if rows_valid <= 0:
+        return (np.empty((0, 0)), np.empty((0, 0)))
+
+    # Base (non‑oversampled) frequency columns we evaluate
+    max_base_cols = (num_cols - _KERNEL_FREQ_LEN + 1) // FREQ_SEARCH_OVERSAMPLING_RATIO
+    if max_base_cols <= 0:
+        return (np.empty((rows_valid, 0)), np.empty((rows_valid, 0)))
+    base_cols = np.arange(max_base_cols) * FREQ_SEARCH_OVERSAMPLING_RATIO  # (B,)
+
+    # Gather the 7 time rows used by the Costas kernel
+    time_offsets = np.array(
+        [i * TIME_SEARCH_OVERSAMPLING_RATIO for i in range(len(COSTAS_SEQUENCE))]
+    )  # (7,)
+    row_idx = time_offsets[:, None] + np.arange(rows_valid)[None, :]  # (7, R)
+
+    # Per‑row tone offsets in columns (oversampled)
+    tone_offsets = np.array(COSTAS_SEQUENCE) * FREQ_SEARCH_OVERSAMPLING_RATIO  # (7,)
+
+    active_accum = None
+    noise_accum = None
+    for s in range(len(COSTAS_SEQUENCE)):
+        rows = fft_pwr[row_idx[s]]  # (R, num_cols)
+
+        # Active tone bin for this symbol (one tone per row)
+        cols_active = base_cols + tone_offsets[s]  # (B,)
+        vals_active = rows[:, cols_active]  # (R, B)
+        active_accum = vals_active if active_accum is None else (active_accum + vals_active)
+
+        # Sum of all 8 tones for this symbol (bins spaced by oversampling ratio)
+        cols_all = base_cols[None, :] + (
+            np.arange(COSTAS_KERNEL_NUM_TONES)[:, None] * FREQ_SEARCH_OVERSAMPLING_RATIO
+        )  # (8, B)
+        vals_all = rows[:, cols_all]  # (R, 8, B)
+        sum_all = vals_all.sum(axis=1)  # (R, B)
+        vals_noise = sum_all - vals_active  # exclude active tone from noise sum
+        noise_accum = vals_noise if noise_accum is None else (noise_accum + vals_noise)
+
+    return active_accum, noise_accum
 
 # Number of FFT bins used per symbol bin. This controls the zero-padding
 # applied to each symbol prior to the FFT and therefore the frequency
@@ -89,9 +151,9 @@ def candidate_score_map(
     with PROFILER.section("search.fft_power"):
         fft_pwr = np.abs(ffts) ** 2
 
+    # Vectorized Costas correlation: sum target tone bins vs non-target bins
     with PROFILER.section("search.correlate"):
-        active_map = correlate2d(fft_pwr, _COSTAS_KERNEL, mode="valid")
-        noise_map = correlate2d(fft_pwr, _NOISE_KERNEL, mode="valid")
+        active_map, noise_map = _costas_active_noise_maps(fft_pwr)
     with PROFILER.section("search.ratio"):
         scores_map = active_map / (noise_map + 1e-12)
 
@@ -114,8 +176,8 @@ def candidate_score_map(
     num_blocks = valid.sum(axis=0)
     scores = (active / (noise + 1e-12)) * num_blocks[:, None]
 
-    scores = scores[:, : (max_base_bin + 1) * FREQ_SEARCH_OVERSAMPLING_RATIO]
-    scores = scores[:, ::FREQ_SEARCH_OVERSAMPLING_RATIO]
+    # scores_map is already at base-bin resolution in our vectorized path
+    scores = scores[:, : (max_base_bin + 1)]
 
     dts = (
         np.arange(max_dt_idx + 1) * step / sample_rate - COSTAS_START_OFFSET_SEC

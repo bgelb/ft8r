@@ -210,28 +210,57 @@ def _costas_energy_with_bases(
 
 
 def fine_time_sync(samples: ComplexSamples, dt: float, search: int) -> float:
-    """Return refined ``dt`` by maximizing Costas energy around ``dt``."""
+    """Return refined ``dt`` by maximizing Costas energy around ``dt``.
+
+    Batched across the integer offset window using a sliding view to avoid
+    rebuilding symbol matrices in Python.
+    """
 
     sample_rate = samples.sample_rate_in_hz
+    sym_len = _symbol_samples(sample_rate)
     base_start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
 
-    offsets = range(-search, search + 1)
-    bases = _zero_offset_bases(sample_rate, _symbol_samples(sample_rate))
-    with PROFILER.section("align.costas_energy_time"):
-        energies = [
-            _costas_energy_with_bases(samples, base_start + off, bases) for off in offsets
-        ]
-    best = int(np.argmax(energies))
-    best_off = offsets[best]
+    seg_len = sym_len * FT8_SYMBOLS_PER_MESSAGE
 
-    # Sub-sample refinement using parabolic interpolation around the peak.
+    # Determine valid offset range so windows stay in-bounds
+    min_start = 0
+    max_start = len(samples.samples) - seg_len
+    start0 = base_start - search
+    start1 = base_start + search
+    v0 = max(start0, min_start)
+    v1 = min(start1, max_start)
+    if v1 < v0:
+        return dt
+
+    # Build a compact strided view over exactly the needed windows
+    count = v1 - v0 + 1
+    base = samples.samples[v0 : v0 + seg_len + count - 1]
+    stride = base.strides[0]
+    windows = np.lib.stride_tricks.as_strided(
+        base, shape=(count, seg_len), strides=(stride, stride)
+    )
+    seg_all = windows.reshape(count, FT8_SYMBOLS_PER_MESSAGE, sym_len)
+
+    bases = _zero_offset_bases(sample_rate, sym_len)  # (8, sym_len)
+
+    with PROFILER.section("align.costas_energy_time"):
+        # resp: (O, 8, 79) = (8, sym_len) x (O, 79, sym_len)
+        resp = np.abs(np.einsum("ks,ons->okn", bases, seg_all)) ** 2
+        tones = np.array(COSTAS_SEQUENCE * 3)
+        pos = np.array(COSTAS_POSITIONS)
+        energies = resp[:, tones, pos].sum(axis=1)  # (O,)
+
+    # Find best within the valid window and map back to absolute offset
+    best_local = int(np.argmax(energies))
+    best_off = (v0 + best_local) - base_start
+
+    # Sub-sample refinement using parabolic interpolation around the peak
     frac = 0.0
-    if 0 < best < len(energies) - 1:
-        y1, y2, y3 = energies[best - 1], energies[best], energies[best + 1]
+    if 0 < best_local < len(energies) - 1:
+        y1, y2, y3 = energies[best_local - 1], energies[best_local], energies[best_local + 1]
         denom = (y1 - 2.0 * y2 + y3)
         if abs(denom) > 1e-12:
             frac = 0.5 * (y1 - y3) / denom
-            # Limit to ±0.5 sample to avoid instability on flat tops
             frac = float(np.clip(frac, -0.5, 0.5))
 
     return dt + (best_off + frac) / sample_rate
@@ -240,20 +269,33 @@ def fine_time_sync(samples: ComplexSamples, dt: float, search: int) -> float:
 def fine_freq_sync(
     samples: ComplexSamples, dt: float, search_hz: float, step_hz: float
 ) -> float:
-    """Return frequency offset maximizing Costas energy with sub-bin refinement."""
+    """Return frequency offset maximizing Costas energy with sub-bin refinement.
+
+    Vectorized across the candidate frequency grid for performance.
+    """
 
     sample_rate = samples.sample_rate_in_hz
     start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
     freqs = np.arange(-search_hz, search_hz + step_hz / 2, step_hz)
     sym_len = _symbol_samples(sample_rate)
     time_idx = np.arange(sym_len) / sample_rate
-    bases0 = _zero_offset_bases(sample_rate, sym_len)
+    bases0 = _zero_offset_bases(sample_rate, sym_len)  # (8, sym_len)
+
+    # Build symbol matrix for the candidate window once.
+    seg = _symbol_matrix(samples.samples, start, sym_len)  # (79, sym_len)
+
     with PROFILER.section("align.costas_energy_freq"):
-        energies = []
-        for f in freqs:
-            shift = np.exp(-2j * np.pi * f * time_idx)
-            bases = bases0 * shift[None, :]
-            energies.append(_costas_energy_with_bases(samples, start, bases))
+        # Stack phase shifts for all freqs: (F, sym_len)
+        shifts = np.exp(-2j * np.pi * freqs[:, None] * time_idx[None, :])
+        # Apply to tone bases to get (F, 8, sym_len)
+        bases = bases0[None, :, :] * shifts[:, None, :]
+        # Batched matmul: (F, 8, sym_len) @ (sym_len, 79) -> (F, 8, 79)
+        resp = np.abs(bases @ seg.T) ** 2
+        # Select Costas tone/symbol positions and sum
+        pos_idx = np.array(COSTAS_POSITIONS)
+        tone_idx = np.array(COSTAS_SEQUENCE * 3)
+        energies = resp[:, tone_idx, pos_idx].sum(axis=1)  # (F,)
+
     best = int(np.argmax(energies))
 
     # Sub-bin refinement via parabolic interpolation around the peak.
