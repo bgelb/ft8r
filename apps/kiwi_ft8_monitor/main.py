@@ -1,0 +1,444 @@
+#!/usr/bin/env python3
+import argparse
+import collections
+import curses
+import math
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from typing import Deque, List
+
+import numpy as np
+
+try:
+    # External dependency providing a simple KiwiSDR audio client
+    # pip install kiwisdr
+    from kiwisdr.client import KiwiSDRStream  # type: ignore
+except Exception:  # pragma: no cover - best effort import
+    KiwiSDRStream = None  # type: ignore
+
+from utils import RealSamples
+from search import find_candidates
+from tests.utils import DEFAULT_SEARCH_THRESHOLD
+from demod import decode_full_period, TONE_SPACING_IN_HZ
+
+
+@dataclass
+class Metrics:
+    dt_utc: float = 0.0
+    window_start: float = 0.0
+    window_end: float = 0.0
+    num_candidates: int = 0
+    num_decodes: int = 0
+    decode_time_s: float = 0.0
+
+
+class KiwiAudioSource:
+    def __init__(self, host: str, port: int, freq_khz: float, mode: str, rate: int):
+        if KiwiSDRStream is None:
+            print(
+                "ERROR: The 'kiwisdr' package is required. Install with 'pip install kiwisdr'",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        self.stream = KiwiSDRStream(
+            host=host,
+            port=port,
+            freq=freq_khz,
+            mode=mode,
+            samp_rate=rate,
+            chan=0,
+        )
+        self.rate = rate
+        self._stop = threading.Event()
+        self._thr: threading.Thread | None = None
+        self.buffer: Deque[float] = collections.deque(maxlen=rate * 15)
+
+    def start(self):
+        def _reader():
+            for chunk in self.stream.get_audio():  # yields numpy arrays float32
+                if self._stop.is_set():
+                    break
+                # Normalize chunk to python floats
+                self.buffer.extend(float(x) for x in chunk)
+
+        self._thr = threading.Thread(target=_reader, daemon=True)
+        self._thr.start()
+
+    def stop(self):
+        self._stop.set()
+        try:
+            self.stream.close()
+        except Exception:
+            pass
+        if self._thr is not None:
+            self._thr.join(timeout=1.0)
+
+    def snapshot_last_15s(self) -> RealSamples:
+        # Copy buffer atomically
+        arr = np.fromiter(self.buffer, dtype=float)
+        return RealSamples(arr, sample_rate_in_hz=self.rate)
+
+
+def next_boundary_utc(now: float) -> float:
+    # Align to :00/:15/:30/:45 boundaries
+    secs = int(now)
+    mod = secs % 15
+    return secs + (15 - mod) if mod != 0 else secs
+
+def next_strict_boundary_utc(now: float, *, epsilon: float = 0.2) -> float:
+    """Return the next 15s boundary strictly after 'now'.
+    If 'now' is at/near a boundary (within epsilon), skip to the following one.
+    """
+    nb = next_boundary_utc(now)
+    if nb - now <= epsilon:
+        nb += 15
+    return nb
+def _snr_db_from_rec(rec: dict) -> float | None:
+    # Prefer explicit SNR if present
+    snr = rec.get('snr')
+    if isinstance(snr, (int, float)):
+        try:
+            return float(snr)
+        except Exception:
+            return None
+    # Fallback: approximate from search score if available (ratio -> dB)
+    score = rec.get('score')
+    if isinstance(score, (int, float)) and score > 0:
+        try:
+            return 10.0 * math.log10(float(score))
+        except Exception:
+            return None
+    return None
+
+
+def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None = None, next_boundary: float | None = None):
+    stdscr.clear()
+    h, w = stdscr.getmaxyx()
+    now_ts = now_ts if now_ts is not None else time.time()
+    # Header
+    stdscr.addstr(0, 0, f"FT8 monitor — window {time.strftime('%H:%M:%S', time.gmtime(metrics.window_start))}–{time.strftime('%H:%M:%S', time.gmtime(metrics.window_end))}Z")
+    # Clock and progress bar
+    utc_str = time.strftime('%H:%M:%S', time.gmtime(now_ts))
+    if next_boundary is None:
+        next_boundary = next_boundary_utc(now_ts)
+    start = next_boundary - 15
+    elapsed = max(0.0, min(15.0, now_ts - start))
+    ratio = elapsed / 15.0 if 15.0 > 0 else 0.0
+    bar_w = max(10, min(w - 40, 40))
+    filled = int(bar_w * ratio)
+    bar = '[' + ('#' * filled) + ('-' * (bar_w - filled)) + ']'
+    stdscr.addstr(1, 0, f"UTC {utc_str}  next {time.strftime('%H:%M:%S', time.gmtime(next_boundary))}Z  {bar} {elapsed:4.1f}/15s")
+    stdscr.addstr(2, 0, f"candidates: {metrics.num_candidates}  decodes: {metrics.num_decodes}  decode_time: {metrics.decode_time_s:.2f}s")
+    stdscr.hline(3, 0, ord('-'), w)
+    # Decodes list (sorted externally); include SNR column when available/approx)
+    row = 4
+    for d in decodes:
+        snr = _snr_db_from_rec(d)
+        snr_str = f"{snr:+4.0f}dB" if (snr is not None and math.isfinite(snr)) else "   --"
+        line = f"{d['dt']:+5.2f}s  {d['freq']:7.1f} Hz  {snr_str:>6}  {d['message']}"
+        if row < h-1:
+            stdscr.addstr(row, 0, line[:w-1])
+            row += 1
+        else:
+            break
+    stdscr.addstr(h-1, 0, "Press q to quit")
+    stdscr.refresh()
+
+
+def run_monitor(host: str, port: int, freq_khz: float, mode: str, rate: int):
+    src = KiwiAudioSource(host, port, freq_khz, mode, rate)
+    src.start()
+    try:
+        time.sleep(1.0)  # fill buffer a bit
+
+        # Curses UI with ticking clock/progress
+        def _main(stdscr):
+            curses.curs_set(0)
+            stdscr.nodelay(True)
+            last_decodes: List[dict] = []
+            last_metrics = Metrics()
+            nb = next_boundary_utc(time.time())
+            while True:
+                now = time.time()
+                if now >= nb:
+                    audio = src.snapshot_last_15s()
+                    sym_len = int(audio.sample_rate_in_hz / TONE_SPACING_IN_HZ)
+                    max_freq_bin = int(3000 / TONE_SPACING_IN_HZ)
+                    max_dt_samples = len(audio.samples) - int(audio.sample_rate_in_hz * 0.5)
+                    max_dt_symbols = -(-max_dt_samples // sym_len)
+                    cand_count = len(find_candidates(audio, max_freq_bin, max_dt_symbols, threshold=DEFAULT_SEARCH_THRESHOLD))
+                    t0 = time.perf_counter()
+                    decs = decode_full_period(audio, threshold=DEFAULT_SEARCH_THRESHOLD)
+                    t1 = time.perf_counter()
+                    decs = sorted(decs, key=lambda d: d.get('freq', 0.0))
+                    last_decodes = decs
+                    last_metrics = Metrics(
+                        dt_utc=nb,
+                        window_start=nb-15,
+                        window_end=nb,
+                        num_candidates=cand_count,
+                        num_decodes=len(decs),
+                        decode_time_s=(t1 - t0),
+                    )
+                    # schedule next boundary
+                    nb = next_boundary_utc(now + 0.1)
+                # Always render clock/progress with last results
+                render(stdscr, last_decodes, last_metrics, now_ts=now, next_boundary=nb)
+                # Handle key
+                try:
+                    ch = stdscr.getch()
+                    if ch in (ord('q'), ord('Q')):
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.2)
+
+        curses.wrapper(_main)
+    finally:
+        src.stop()
+
+def run_monitor_recorder(host: str, port: int, freq_khz: float, mode: str, rate: int):
+    """Live monitor using external kiwirecorder.py rotating 15s WAV files.
+    Requires local bin at apps/kiwi_ft8_monitor/bin/kiwirecorder.py or PATH.
+    """
+    import shutil, subprocess, tempfile, os
+    from pathlib import Path
+    from utils import read_wav
+
+    app_dir = Path(__file__).resolve().parent
+    local_rec = app_dir / 'bin' / 'kiwirecorder.py'
+    rec = str(local_rec) if local_rec.exists() else shutil.which('kiwirecorder.py')
+    if not rec:
+        print("ERROR: kiwirecorder.py not found. Run apps/kiwi_ft8_monitor/install_kiwirecorder.sh", file=sys.stderr)
+        return
+
+    tdir_ctx = tempfile.TemporaryDirectory()
+    tdir = tdir_ctx.name
+    cmd = [
+        rec,
+        '-s', str(host),
+        '-p', str(port),
+        '-f', str(freq_khz),
+        '-m', mode,
+        '-r', str(rate),
+        '--dt-sec', '15',
+        '--connect-timeout', '5',
+        '--busy-timeout', '5',
+        '-d', tdir,
+        '--not-quiet',
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    processed: set[str] = set()
+
+    def _main(stdscr):
+        curses.curs_set(0)
+        stdscr.nodelay(True)
+        last_decodes: List[dict] = []
+        last_metrics = Metrics()
+        try:
+            nb = next_boundary_utc(time.time())
+            while True:
+                wavs = sorted([str(Path(tdir)/p) for p in os.listdir(tdir) if p.lower().endswith('.wav')])
+                # Decode any new completed file(s) except the newest (being written)
+                to_decode = [w for w in wavs[:-1] if w not in processed]
+                if to_decode:
+                    wav_path = to_decode[-1]
+                    audio = read_wav(wav_path)
+                    sym_len = int(audio.sample_rate_in_hz / TONE_SPACING_IN_HZ)
+                    max_freq_bin = int(3000 / TONE_SPACING_IN_HZ)
+                    max_dt_samples = len(audio.samples) - int(audio.sample_rate_in_hz * 0.5)
+                    max_dt_symbols = -(-max_dt_samples // sym_len)
+                    t0 = time.perf_counter()
+                    cands = find_candidates(audio, max_freq_bin, max_dt_symbols, threshold=DEFAULT_SEARCH_THRESHOLD)
+                    decs = decode_full_period(audio, threshold=DEFAULT_SEARCH_THRESHOLD)
+                    decs = sorted(decs, key=lambda d: d.get('freq', 0.0))
+                    t1 = time.perf_counter()
+                    # Approximate window bounds from current UTC boundary
+                    now = time.time(); nb = next_boundary_utc(now)
+                    last_decodes[:] = decs
+                    last_metrics.dt_utc = nb
+                    last_metrics.window_start = nb-15
+                    last_metrics.window_end = nb
+                    last_metrics.num_candidates = len(cands)
+                    last_metrics.num_decodes = len(decs)
+                    last_metrics.decode_time_s = (t1 - t0)
+                    processed.add(wav_path)
+                # periodic render with ticking clock/progress
+                now2 = time.time(); nb2 = next_boundary_utc(now2)
+                render(stdscr, last_decodes, last_metrics, now_ts=now2, next_boundary=nb2)
+                # handle key
+                try:
+                    ch = stdscr.getch()
+                    if ch in (ord('q'), ord('Q')):
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.25)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
+            tdir_ctx.cleanup()
+
+    curses.wrapper(_main)
+
+
+def run_oneshot(host: str, port: int, freq_khz: float, mode: str, rate: int, no_ui: bool = True):
+    """Connect to Kiwi, capture a single 15 s FT8 window aligned to UTC boundaries, decode, exit.
+
+    If the kiwisdr Python package is unavailable, falls back to using the external
+    'kiwirecorder.py' if found on PATH to capture a 15 s WAV.
+    """
+    from tests.utils import DEFAULT_SEARCH_THRESHOLD
+    if KiwiSDRStream is None:
+        # Fallback: use kiwirecorder.py to capture a single 15 s WAV aligned to boundary
+        import shutil, tempfile, subprocess, os
+        from pathlib import Path
+        # Prefer local bin under app dir, else PATH
+        app_dir = Path(__file__).resolve().parent
+        local_rec = app_dir / 'bin' / 'kiwirecorder.py'
+        rec = str(local_rec) if local_rec.exists() else shutil.which('kiwirecorder.py')
+        if not rec:
+            print("ERROR: neither 'kiwisdr' package nor 'kiwirecorder.py' found. Run apps/kiwi_ft8_monitor/install_kiwirecorder.sh to install locally.", file=sys.stderr)
+            return
+        # Align to boundary
+        now = time.time(); nb = next_strict_boundary_utc(now); time.sleep(max(0.0, nb - now))
+        with tempfile.TemporaryDirectory() as td:
+            # Build kiwirecorder command: 15 s audio, USB, sample rate
+            cmd = [
+                rec,
+                '-s', str(host),
+                '-p', str(port),
+                '-f', str(freq_khz),
+                '-m', mode,
+                '-r', str(rate),
+                '--tlimit', '15',
+                '--connect-timeout', '5',
+                '--connect-retries', '2',
+                '--busy-timeout', '5',
+                '--busy-retries', '2',
+                '-d', td,
+            ]
+            try:
+                subprocess.run(cmd, check=True, timeout=75)
+            except subprocess.TimeoutExpired:
+                print('ERROR: kiwirecorder timed out', file=sys.stderr)
+                return
+            # Find the WAV written
+            wavs = [p for p in os.listdir(td) if p.lower().endswith('.wav')]
+            if not wavs:
+                print('ERROR: kiwirecorder did not produce a WAV', file=sys.stderr)
+                return
+            from utils import read_wav
+            audio = read_wav(os.path.join(td, wavs[0]))
+        # Decode
+        sym_len = int(audio.sample_rate_in_hz / TONE_SPACING_IN_HZ)
+        max_freq_bin = int(3000 / TONE_SPACING_IN_HZ)
+        max_dt_samples = len(audio.samples) - int(audio.sample_rate_in_hz * 0.5)
+        max_dt_symbols = -(-max_dt_samples // sym_len)
+        cands = find_candidates(audio, max_freq_bin, max_dt_symbols, threshold=DEFAULT_SEARCH_THRESHOLD)
+        t1 = time.perf_counter(); decs = decode_full_period(audio, threshold=DEFAULT_SEARCH_THRESHOLD); t2 = time.perf_counter()
+        decs = sorted(decs, key=lambda d: d.get('freq', 0.0))
+        metrics = Metrics(dt_utc=nb, window_start=nb-15, window_end=nb, num_candidates=len(cands), num_decodes=len(decs), decode_time_s=(t2-t1))
+        print(f"candidates={metrics.num_candidates} decodes={metrics.num_decodes} decode_time={metrics.decode_time_s:.2f}s")
+        for d in decs:
+            snr = _snr_db_from_rec(d)
+            snr_str = f"{snr:+4.0f}dB" if (snr is not None and math.isfinite(snr)) else "   --"
+            print(f"{d['dt']:+5.2f}s {d['freq']:7.1f}Hz {snr_str:>6} {d['message']}")
+        return
+    # Normal streaming oneshot
+    src = KiwiAudioSource(host, port, freq_khz, mode, rate)
+    src.start()
+    try:
+        need = rate * 15; t0 = time.time()
+        while len(src.buffer) < need:
+            time.sleep(0.05)
+            if time.time() - t0 > 30: break
+        now = time.time(); nb = next_strict_boundary_utc(now); time.sleep(max(0.0, nb - now))
+        audio = src.snapshot_last_15s()
+        sym_len = int(audio.sample_rate_in_hz / TONE_SPACING_IN_HZ)
+        max_freq_bin = int(3000 / TONE_SPACING_IN_HZ)
+        max_dt_samples = len(audio.samples) - int(audio.sample_rate_in_hz * 0.5)
+        max_dt_symbols = -(-max_dt_samples // sym_len)
+        cands = find_candidates(audio, max_freq_bin, max_dt_symbols, threshold=DEFAULT_SEARCH_THRESHOLD)
+        t1 = time.perf_counter(); decs = decode_full_period(audio, threshold=DEFAULT_SEARCH_THRESHOLD); t2 = time.perf_counter()
+        decs = sorted(decs, key=lambda d: d.get('freq', 0.0))
+        metrics = Metrics(dt_utc=nb, window_start=nb-15, window_end=nb, num_candidates=len(cands), num_decodes=len(decs), decode_time_s=(t2-t1))
+        if no_ui:
+            print(f"candidates={metrics.num_candidates} decodes={metrics.num_decodes} decode_time={metrics.decode_time_s:.2f}s")
+            for d in decs:
+                snr = _snr_db_from_rec(d)
+                snr_str = f"{snr:+4.0f}dB" if (snr is not None and math.isfinite(snr)) else "   --"
+                print(f"{d['dt']:+5.2f}s {d['freq']:7.1f}Hz {snr_str:>6} {d['message']}")
+        else:
+            def _once(stdscr):
+                curses.curs_set(0); render(stdscr, decs, metrics); stdscr.getch()
+            curses.wrapper(_once)
+    finally:
+        src.stop()
+
+
+def main():
+    ap = argparse.ArgumentParser(description="KiwiSDR FT8 monitor (console)")
+    ap.add_argument("--host", default="192.168.2.10")
+    ap.add_argument("--port", type=int, default=8073)
+    ap.add_argument("--freq-khz", type=float, default=14074.0, help="dial frequency in kHz (USB)")
+    ap.add_argument("--mode", default="usb")
+    ap.add_argument("--rate", type=int, default=12000)
+    ap.add_argument("--wav", type=str, default="", help="offline mode: path to 12 kHz mono WAV to process")
+    ap.add_argument("--no-ui", action="store_true", help="disable curses UI; print plain lines")
+    ap.add_argument("--oneshot", action="store_true", help="connect to Kiwi, capture one 15s window, decode, exit")
+    args = ap.parse_args()
+
+    if args.wav:
+        # Offline test mode: process a single 15 s window from a WAV
+        from utils import read_wav
+        from tests.utils import DEFAULT_SEARCH_THRESHOLD
+
+        audio = read_wav(args.wav)
+        sym_len = int(audio.sample_rate_in_hz / TONE_SPACING_IN_HZ)
+        max_freq_bin = int(3000 / TONE_SPACING_IN_HZ)
+        max_dt_samples = len(audio.samples) - int(audio.sample_rate_in_hz * 0.5)
+        max_dt_symbols = -(-max_dt_samples // sym_len)
+        t0 = time.perf_counter()
+        cands = find_candidates(audio, max_freq_bin, max_dt_symbols, threshold=DEFAULT_SEARCH_THRESHOLD)
+        decs = decode_full_period(audio, threshold=DEFAULT_SEARCH_THRESHOLD)
+        decs = sorted(decs, key=lambda d: d.get('freq', 0.0))
+        t1 = time.perf_counter()
+        if args.no_ui:
+            print(f"candidates={len(cands)} decodes={len(decs)} decode_time={t1-t0:.2f}s")
+            for d in decs:
+                snr = _snr_db_from_rec(d)
+                snr_str = f"{snr:+4.0f}dB" if (snr is not None and math.isfinite(snr)) else "   --"
+                print(f"{d['dt']:+5.2f}s {d['freq']:7.1f}Hz {snr_str:>6} {d['message']}")
+        else:
+            def _one(stdscr):
+                curses.curs_set(0)
+                metrics = Metrics(window_start=0, window_end=15, num_candidates=len(cands), num_decodes=len(decs), decode_time_s=(t1-t0))
+                render(stdscr, decs, metrics)
+                stdscr.getch()
+            curses.wrapper(_one)
+        return
+
+    if args.oneshot:
+        run_oneshot(args.host, args.port, args.freq_khz, args.mode, args.rate, no_ui=args.no_ui)
+        return
+
+    if args.no_ui:
+        print("--no-ui is supported with --wav or --oneshot. For live monitoring use the curses UI.")
+        return
+
+    # Dispatch by mode & availability
+    if KiwiSDRStream is not None:
+        run_monitor(args.host, args.port, args.freq_khz, args.mode, args.rate)
+    else:
+        run_monitor_recorder(args.host, args.port, args.freq_khz, args.mode, args.rate)
+
+
+if __name__ == "__main__":
+    main()
