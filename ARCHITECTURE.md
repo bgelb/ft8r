@@ -41,12 +41,7 @@ A narrow FFT “slice” centered on the candidate base frequency is extracted, 
   - `fine_sync_candidate(samples_in, freq, dt)`
   - The legacy integer-grid alignment path has been removed.
 
-Given a coarse `(dt, freq)`, the decoder refines the start time and frequency by maximizing Costas energy around the sync positions. Two complementary methods are used:
-
-- Quadratic‑refined method: perform parabolic (quadratic) interpolation over the discrete energy samples to obtain sub‑sample timing and sub‑bin frequency offsets. This uses three‑point peak fitting around the strongest integer offset/bin.
-- Integer‑grid method: use the best integer sample/bin without fractional refinement.
-
-The decoder attempts both methods for each candidate and accepts any valid decodes produced by either alignment, providing robustness across a range of signal conditions.
+Given a coarse `(dt, freq)`, the decoder refines the start time and frequency by maximizing Costas energy around the sync positions using a quadratic‑refined method: parabolic (quadratic) interpolation over the discrete energy samples to obtain sub‑sample timing and sub‑bin frequency offsets. This uses three‑point peak fitting around the strongest integer offset/bin.
 
 Parabolic refinement uses the standard three‑point vertex estimate (clamped to ±0.5 for stability):
 
@@ -73,7 +68,7 @@ LLRs are converted into per‑bit error probabilities (with reliability scaling)
 - File: `demod.py`
 - Key function: `decode_full_period(samples_in, threshold)`
 
-Calls the candidate search, applies both fine synchronization methods, demodulates, LDPC‑decodes, and text‑decodes each valid message. Each successful decode returns a dictionary with `message`, `score`, `freq`, and `dt`.
+Calls the candidate search, applies refined (quadratic) fine synchronization, demodulates, LDPC‑decodes, and text‑decodes each valid message. Each successful decode returns a dictionary with `message`, `score`, `freq`, and `dt`.
 
 ### Performance tuning and profiling
 
@@ -129,12 +124,10 @@ Legacy alignment has been removed to streamline performance and maintenance.
   - Efficiency vs. accuracy: quadratic interpolation uses only the peak and two neighbors, adding minimal compute while yielding sub‑grid estimates whose error decreases rapidly with SNR.
   - Robustness: higher‑order (e.g., cubic) fits require more points and are more sensitive to noise/model mismatch. Quadratic is a strong balance for small windows.
 
-- **Dual alignment methods**:
-  - Using both quadratic‑refined and integer‑grid alignment improves resilience. Some marginal signals favor the integer‑grid solution; others benefit from sub‑sample refinement. Running both avoids mode‑specific failures.
+ 
 
 ### References
 
 - Julius O. Smith III, Spectral Audio Signal Processing, “Quadratic Interpolation of Spectral Peaks.” Stanford CCRMA. [Quadratic Interpolation of Spectral Peaks](https://ccrma.stanford.edu/~jos/sasp/Quadratic_Interpolation_Spectral_Peaks.html)
 - R. Quinn, “Estimation of frequency by interpolation using Fourier coefficients,” IEEE Transactions on Signal Processing, 1994.
 - M. I. Smith and S. F. M. Smith, “Image registration with sub‑pixel accuracy using correlation,” IEE Proceedings, 1997.
-
