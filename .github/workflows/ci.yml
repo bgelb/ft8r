@@ -197,3 +197,40 @@ jobs:
             } else {
               await github.rest.issues.createComment({owner, repo, issue_number, body});
             }
+
+      - name: Run performance summary
+        if: always()
+        run: |
+          python --version
+          python scripts/perf_summary.py --stem ${FT8R_PERF_STEM:-websdr_test6} --repeats ${FT8R_PERF_REPEATS:-3} | tee .tmp/ft8r_perf.json
+
+      - name: Comment performance on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          PERF_JSON: .tmp/ft8r_perf.json
+        with:
+          script: |
+            const marker = '<!-- ft8r-perf -->';
+            const fs = require('fs');
+            let body;
+            try {
+              const txt = fs.readFileSync(process.env.PERF_JSON, 'utf8');
+              const j = JSON.parse(txt);
+              const best = (j.best_s ?? 0).toFixed(3);
+              const avg = (j.avg_s ?? 0).toFixed(3);
+              const med = (j.median_s ?? 0).toFixed(3);
+              const dec = j.decoded_count ?? 0;
+              body = `${marker}\n**Performance (decode_full_period)**\n- sample: ${j.stem}\n- repeats: ${j.repeats}\n- best: ${best}s\n- avg: ${avg}s (median: ${med}s)\n- decoded count (last run): ${dec}`;
+            } catch (e) {
+              body = `${marker}\n**Performance (decode_full_period)**\n- NOT RUN`;
+            }
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number;
+            const {data: comments} = await github.rest.issues.listComments({owner, repo, issue_number, per_page: 100});
+            const prev = comments.find(c => c.body && c.body.includes(marker));
+            if (prev) {
+              await github.rest.issues.updateComment({owner, repo, comment_id: prev.id, body});
+            } else {
+              await github.rest.issues.createComment({owner, repo, issue_number, body});
+            }

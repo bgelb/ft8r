@@ -78,8 +78,7 @@ _ENV_MAX = os.getenv("FT8R_MAX_CANDIDATES", "").strip()
 # Default cap chosen from empirical candidate distribution (p99≈1244, max≈1260)
 # across bundled samples, with headroom. Set to 0 to disable capping.
 _MAX_CANDIDATES = 1500 if _ENV_MAX == "" else int(_ENV_MAX)
-_DISABLE_LEGACY = os.getenv("FT8R_DISABLE_LEGACY", "0") not in ("0", "", "false", "False")
-_RUN_BOTH_ALIGNMENTS = os.getenv("FT8R_RUN_BOTH", "1") not in ("0", "false", "False")
+# Legacy alignment path removed.
 # Allow bypassing CRC gating for troubleshooting only. Defaults to disabled.
 _ALLOW_CRC_FAIL = os.getenv("FT8R_ALLOW_CRC_FAIL", "0") not in ("0", "", "false", "False")
 # Column reordering around LDPC is not used; H columns match transmitted order.
@@ -238,21 +237,6 @@ def fine_time_sync(samples: ComplexSamples, dt: float, search: int) -> float:
     return dt + (best_off + frac) / sample_rate
 
 
-def _fine_time_sync_integer(samples: ComplexSamples, dt: float, search: int) -> float:
-    """Return refined ``dt`` using integer-sample peak only (legacy behavior)."""
-
-    sample_rate = samples.sample_rate_in_hz
-    base_start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
-    offsets = range(-search, search + 1)
-    with PROFILER.section("align.costas_energy_time_legacy"):
-        energies = [
-            _costas_energy(samples, base_start + off, 0.0) for off in offsets
-        ]
-    best = int(np.argmax(energies))
-    best_off = offsets[best]
-    return dt + best_off / sample_rate
-
-
 def fine_freq_sync(
     samples: ComplexSamples, dt: float, search_hz: float, step_hz: float
 ) -> float:
@@ -284,24 +268,7 @@ def fine_freq_sync(
     return float(freqs[best] + frac * step_hz)
 
 
-def _fine_freq_sync_maxbin(
-    samples: ComplexSamples, dt: float, search_hz: float, step_hz: float
-) -> float:
-    """Return frequency offset using maximum bin only (legacy behavior)."""
-    sample_rate = samples.sample_rate_in_hz
-    start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
-    freqs = np.arange(-search_hz, search_hz + step_hz / 2, step_hz)
-    sym_len = _symbol_samples(sample_rate)
-    time_idx = np.arange(sym_len) / sample_rate
-    bases0 = _zero_offset_bases(sample_rate, sym_len)
-    with PROFILER.section("align.costas_energy_freq_legacy"):
-        energies = []
-        for f in freqs:
-            shift = np.exp(-2j * np.pi * f * time_idx)
-            bases = bases0 * shift[None, :]
-            energies.append(_costas_energy_with_bases(samples, start, bases))
-    best = int(np.argmax(energies))
-    return float(freqs[best])
+ 
 
 
 def fine_sync_candidate(
@@ -340,29 +307,7 @@ def fine_sync_candidate(
     return ComplexSamples(trimmed, bb.sample_rate_in_hz), dt, freq
 
 
-def _fine_sync_candidate_legacy(
-    samples_in: RealSamples, freq: float, dt: float, *, precomputed_fft: tuple | None = None
-) -> Tuple[ComplexSamples, float, float]:
-    """Legacy alignment without sub-sample refinement.
-
-    This mirrors the earlier implementation to act as a safe fallback for
-    borderline signals where fractional interpolation occasionally harms
-    demodulation.
-    """
-
-    bb = downsample_to_baseband(samples_in, freq, precomputed_fft=precomputed_fft)
-    dt = _fine_time_sync_integer(bb, dt, 10)
-    df = _fine_freq_sync_maxbin(bb, dt, 5.0, 0.25)
-    freq += df
-    bb = downsample_to_baseband(samples_in, freq, precomputed_fft=precomputed_fft)
-    dt = _fine_time_sync_integer(bb, dt, 4)
-
-    sym_len = _symbol_samples(bb.sample_rate_in_hz)
-    start = int(round((dt + COSTAS_START_OFFSET_SEC) * bb.sample_rate_in_hz))
-    end = start + sym_len * FT8_SYMBOLS_PER_MESSAGE
-    trimmed = bb.samples[start:end]
-
-    return ComplexSamples(trimmed, bb.sample_rate_in_hz), dt, freq
+ 
 
 
 def soft_demod(samples_in: ComplexSamples) -> np.ndarray:
@@ -513,7 +458,7 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
         margin = int(round(10 * sample_rate / BASEBAND_RATE_HZ))
         if start - margin < 0 or end + margin > len(samples_in.samples):
             continue
-        # Try refined path first; optionally also run legacy afterward
+        # Run refined alignment path
         decoded_any = False
         try:
             with PROFILER.section("align.pipeline_refined"):
@@ -551,38 +496,6 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
         except Exception:
             decoded_any = False
 
-        if not _DISABLE_LEGACY and (_RUN_BOTH_ALIGNMENTS or not decoded_any):
-            try:
-                with PROFILER.section("align.pipeline_legacy"):
-                    bb, dt_f, freq_f = _fine_sync_candidate_legacy(
-                        samples_in, freq, dt, precomputed_fft=precomputed_fft
-                    )
-                with PROFILER.section("demod.soft"):
-                    llrs = soft_demod(bb)
-                if _MIN_LLR_AVG > 0.0 and float(np.mean(np.abs(llrs))) < _MIN_LLR_AVG:
-                    raise RuntimeError("low_llr")
-                hard_bits = naive_hard_decode(llrs)
-                method = "hard"
-                if check_crc(hard_bits):
-                    decoded_bits = hard_bits
-                else:
-                    with PROFILER.section("ldpc.total"):
-                        decoded_bits = ldpc_decode(llrs)
-                    method = "ldpc"
-                # Enforce CRC gating after LDPC/hard decision
-                if _ALLOW_CRC_FAIL or check_crc(decoded_bits):
-                    text = decode77(decoded_bits[:77])
-                    rec = {
-                        "message": text,
-                        "score": score,
-                        "freq": freq_f,
-                        "dt": dt_f,
-                        "method": method,
-                    }
-                    if include_bits:
-                        rec["bits"] = decoded_bits
-                    results.append(rec)
-            except Exception:
-                pass
+        # Legacy alignment removed
 
     return results
