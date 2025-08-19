@@ -32,7 +32,7 @@ def matched_decodes_for_cap(wav_path: Path, cap: int) -> Tuple[int, int, int]:
         demod_mod._MAX_CANDIDATES = 0
     else:
         demod_mod._MAX_CANDIDATES = int(cap)
-    demod_mod._DISABLE_LEGACY = False
+    # Legacy alignment no longer exists; nothing to toggle
 
     audio = read_wav(str(wav_path))
     results = demod_mod.decode_full_period(audio)
@@ -96,5 +96,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

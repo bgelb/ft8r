@@ -39,14 +39,9 @@ A narrow FFT “slice” centered on the candidate base frequency is extracted, 
   - `fine_time_sync(samples, dt, search)`
   - `fine_freq_sync(samples, dt, search_hz, step_hz)`
   - `fine_sync_candidate(samples_in, freq, dt)`
-  - Additional methods: `_fine_time_sync_integer`, `_fine_freq_sync_maxbin`, `_fine_sync_candidate_legacy`
+  - The legacy integer-grid alignment path has been removed.
 
-Given a coarse `(dt, freq)`, the decoder refines the start time and frequency by maximizing Costas energy around the sync positions. Two complementary methods are used:
-
-- Quadratic‑refined method: perform parabolic (quadratic) interpolation over the discrete energy samples to obtain sub‑sample timing and sub‑bin frequency offsets. This uses three‑point peak fitting around the strongest integer offset/bin.
-- Integer‑grid method: use the best integer sample/bin without fractional refinement.
-
-The decoder attempts both methods for each candidate and accepts any valid decodes produced by either alignment, providing robustness across a range of signal conditions.
+Given a coarse `(dt, freq)`, the decoder refines the start time and frequency by maximizing Costas energy around the sync positions using a quadratic‑refined method: parabolic (quadratic) interpolation over the discrete energy samples to obtain sub‑sample timing and sub‑bin frequency offsets. This uses three‑point peak fitting around the strongest integer offset/bin.
 
 Parabolic refinement uses the standard three‑point vertex estimate (clamped to ±0.5 for stability):
 
@@ -73,7 +68,7 @@ LLRs are converted into per‑bit error probabilities (with reliability scaling)
 - File: `demod.py`
 - Key function: `decode_full_period(samples_in, threshold)`
 
-Calls the candidate search, applies both fine synchronization methods, demodulates, LDPC‑decodes, and text‑decodes each valid message. Each successful decode returns a dictionary with `message`, `score`, `freq`, and `dt`.
+Calls the candidate search, applies refined (quadratic) fine synchronization, demodulates, LDPC‑decodes, and text‑decodes each valid message. Each successful decode returns a dictionary with `message`, `score`, `freq`, and `dt`.
 
 ### Performance tuning and profiling
 
@@ -96,7 +91,7 @@ PYTHONPATH=. FT8R_PROFILE=1 python scripts/profile_decode.py websdr_test6 --json
 - Cache the 16s full‑period FFT once per decode and reuse for baseband slicing.
 - Precompute the fixed edge taper window for FFT slices.
 - Cache zero‑offset tone bases per `(sample_rate, sym_len)` and apply per‑frequency phase shifts for fine frequency sync.
-- Attempt both refined and legacy alignment paths (see below). A fast CRC short‑circuit on hard decisions avoids expensive LDPC when possible.
+- Run a single refined alignment path. A fast CRC short‑circuit on hard decisions avoids expensive LDPC when possible.
 
 All changes preserve numerical results; any behavior differences can be gated via environment variables described next.
 
@@ -105,11 +100,7 @@ All changes preserve numerical results; any behavior differences can be gated vi
 - `FT8R_MAX_CANDIDATES` (default: `1500`; `0` disables capping)
   - Controls how many top candidates (time/frequency peaks) are fully processed. Trade‑off: fewer candidates reduce total alignment/LDPC work (faster), but could miss marginal signals. Default chosen with headroom: across bundled samples, candidate counts are approximately p95≈1172, p99≈1244, max≈1260; we set 1500 to exceed the observed maximum.
 
-- `FT8R_DISABLE_LEGACY` (default: `0`)
-  - When `1`, skips the legacy (integer‑grid) alignment path. Trade‑off: less robust on some marginal signals but faster. Keep off for maximum coverage; enable for lower latency scenarios.
-
-- `FT8R_RUN_BOTH` (default: `1`)
-  - When `1`, runs both refined and legacy alignment for each candidate (original behavior). When `0`, run legacy only if refined fails to decode. Trade‑off: running both increases chances that at least one alignment decodes the signal at the cost of extra compute. The default favors robustness.
+The legacy alignment toggles have been removed.
 
 - `FT8R_MIN_LLR_AVG` (default: `0.0` = disabled)
   - If set to a positive float, performs an early reject when average |LLR| for a candidate is below this threshold, skipping LDPC. Trade‑off: can significantly reduce LDPC workload but risks dropping very weak decodes if set too high. Recommended only for latency‑critical deployments after tuning on your signal set.
@@ -124,7 +115,7 @@ Additional flags used in CI/testing:
   - Distribution: p95≈1172, p99≈1244, max≈1260.
   - Default cap set to 1500 to exceed p99 and the observed max, providing headroom for unseen inputs while bounding worst‑case runtime.
 - We profiled with `scripts/profile_decode.py` and found runtime dominated by LDPC and candidate search correlation on busy samples; the implemented caching and reuse reduced overhead meaningfully.
-- Robustness: we preserved the original behavior of running both refined and legacy alignment by default (`FT8R_RUN_BOTH=1`) to avoid decode regressions while still allowing speed‑oriented configurations.
+Legacy alignment has been removed to streamline performance and maintenance.
 
 ### Design choices
 
@@ -133,13 +124,10 @@ Additional flags used in CI/testing:
   - Efficiency vs. accuracy: quadratic interpolation uses only the peak and two neighbors, adding minimal compute while yielding sub‑grid estimates whose error decreases rapidly with SNR.
   - Robustness: higher‑order (e.g., cubic) fits require more points and are more sensitive to noise/model mismatch. Quadratic is a strong balance for small windows.
 
-- **Dual alignment methods**:
-  - Using both quadratic‑refined and integer‑grid alignment improves resilience. Some marginal signals favor the integer‑grid solution; others benefit from sub‑sample refinement. Running both avoids mode‑specific failures.
+ 
 
 ### References
 
 - Julius O. Smith III, Spectral Audio Signal Processing, “Quadratic Interpolation of Spectral Peaks.” Stanford CCRMA. [Quadratic Interpolation of Spectral Peaks](https://ccrma.stanford.edu/~jos/sasp/Quadratic_Interpolation_Spectral_Peaks.html)
 - R. Quinn, “Estimation of frequency by interpolation using Fourier coefficients,” IEEE Transactions on Signal Processing, 1994.
 - M. I. Smith and S. F. M. Smith, “Image registration with sub‑pixel accuracy using correlation,” IEE Proceedings, 1997.
-
-
