@@ -202,7 +202,9 @@ jobs:
         if: always()
         run: |
           python --version
-          python scripts/perf_summary.py --stem ${FT8R_PERF_STEM:-websdr_test6} --repeats ${FT8R_PERF_REPEATS:-3} | tee .tmp/ft8r_perf.json
+          PYTHONPATH="$GITHUB_WORKSPACE" python scripts/perf_summary.py \
+            --stem ${FT8R_PERF_STEM:-websdr_test6} \
+            --repeats ${FT8R_PERF_REPEATS:-3} | tee .tmp/ft8r_perf.json
 
       - name: Comment performance on PR
         if: always() && github.event_name == 'pull_request'
