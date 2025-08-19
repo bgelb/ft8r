@@ -49,6 +49,12 @@ _LDPC_DECODER = ldpc.BpOsdDecoder(
     osd_order=2,
 )
 
+# Small reusable buffers to reduce per-call allocations in LDPC path
+_LLR_ABS_BUF = np.empty(174, dtype=float)
+_ERR_PROB_BUF = np.empty(174, dtype=float)
+_HARD_BOOL_BUF = np.empty(174, dtype=bool)
+_HARD_BUF = np.empty(174, dtype=np.uint8)
+
 
 # Note: For the FT8 (174,91) code used here, the transmitted codeword order
 # matches the decoder/LDPC parity matrix column order. The first 91 bits are
@@ -419,25 +425,31 @@ def ldpc_decode(llrs: np.ndarray) -> str:
         values favour ``1`` and negative values favour ``0``.
     """
 
-    hard = (llrs > 0).astype(np.uint8)
+    # Ensure contiguous float64 LLRs
+    llrs = np.ascontiguousarray(llrs, dtype=float)
+    # Compute hard bits into reusable buffers
+    np.greater(llrs, 0.0, out=_HARD_BOOL_BUF)
+    _HARD_BUF[:] = _HARD_BOOL_BUF.astype(np.uint8, copy=False)
     # Convert log-likelihood ratios to bit error probabilities.  ``update_channel_probs``
     # expects the probability of each received bit being flipped.  ``llrs`` encode the
     # log of ``p(1) / p(0)`` so ``1 / (1 + exp(abs(llr)))`` is the probability that the
     # hard decision is wrong.
     # Scaling the LLR magnitude reduces the effective bit error probability
     # which helps the belief propagation decoder converge on weak signals.
-    # The factor 7.0 mirrors the reliability scaling used by WSJT-X.  It was
-    # tuned empirically by trying a range of values and selecting the one that
-    # best matched WSJT-X's decode rate on the sample set.
-    error_prob = 1.0 / (np.exp(7.0 * np.abs(llrs)) + 1.0)
+    # The factor 7.0 mirrors the reliability scaling used by WSJT-X.
+    np.abs(llrs, out=_LLR_ABS_BUF)
+    _LLR_ABS_BUF *= 7.0
+    np.exp(_LLR_ABS_BUF, out=_LLR_ABS_BUF)
+    _LLR_ABS_BUF += 1.0
+    np.divide(1.0, _LLR_ABS_BUF, out=_ERR_PROB_BUF)
     with PROFILER.section("ldpc.update_channel_probs"):
-        _LDPC_DECODER.update_channel_probs(error_prob)
+        _LDPC_DECODER.update_channel_probs(_ERR_PROB_BUF)
 
-    syndrome = (LDPC_174_91_H @ hard) % 2
+    syndrome = (LDPC_174_91_H @ _HARD_BUF) % 2
     syndrome = syndrome.astype(np.uint8)
     with PROFILER.section("ldpc.decode"):
         err_est = _LDPC_DECODER.decode(syndrome)
-    corrected = np.bitwise_xor(err_est.astype(np.uint8), hard)
+    corrected = np.bitwise_xor(err_est.astype(np.uint8), _HARD_BUF)
     # Optional development-time parity assertion to verify decoder correctness
     if os.getenv("FT8R_ASSERT_PARITY", "0") not in ("0", "", "false", "False"):
         syn2 = (LDPC_174_91_H @ corrected) % 2
