@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from demod import decode_full_period
-from utils import read_wav
+from utils import read_wav, FT8_SYMBOL_LENGTH_IN_SEC, TONE_SPACING_IN_HZ
 from tests.utils import DEFAULT_DT_EPS, DEFAULT_FREQ_EPS, ft8code_bits, resolve_wsjt_binary
 
 # Directory containing sample WAVs and accompanying TXT files from ft8_lib
@@ -47,6 +47,11 @@ def check_decodes(results, expected):
                 matched += 1
                 break
     return matched
+
+
+def _strict_eps() -> tuple[float, float]:
+    """Return (dt_eps, freq_eps) for strict classification."""
+    return 0.5 * FT8_SYMBOL_LENGTH_IN_SEC, 0.5 * TONE_SPACING_IN_HZ
 
 
 def find_wrong_text_decodes(results, expected):
@@ -104,6 +109,19 @@ def test_decode_sample_wavs_aggregate():
     raw_decodes = 0
     hard_crc_total = 0
     stems = list_all_stems()
+    # Additional breakdown: classify unique (deduped) correct decodes into
+    # strict vs text-only based on the dt/freq of the kept (first) instance,
+    # and compare with an alternative "best" dedup policy.
+    strict_dedup_first = 0
+    text_only_dedup_first = 0
+    # Track text-only dt/freq errors against the closest golden pair
+    text_only_dt_errors: list[float] = []
+    text_only_df_errors: list[float] = []
+    # Accumulate all golden (dt,freq) pairs keyed by message text
+    expected_map: dict[str, list[tuple[float, float]]] = {}
+    # Group all decodes by payload for dedup analysis
+    groups: dict[str, list[dict]] = {}
+
     for stem in stems:
         wav_path = DATA_DIR / f"{stem}.wav"
         txt_path = DATA_DIR / f"{stem}.txt"
@@ -120,6 +138,11 @@ def test_decode_sample_wavs_aggregate():
         expected_records = parse_expected(txt_path)
         for (msg, _dt, _freq) in expected_records:
             expected_set.add(msg)
+            expected_map.setdefault(msg, []).append((_dt, _freq))
+        # Capture all decodes for dedup analysis (grouped by payload)
+        for r in results:
+            bits = r.get("bits") or r["message"]
+            groups.setdefault(bits, []).append(r)
 
     assert len(expected_set) > 0, "No sample records found"
     total_decodes = len(decoded_map)
@@ -128,13 +151,75 @@ def test_decode_sample_wavs_aggregate():
     false_decodes = total_decodes - correct_decodes
     decode_rate = correct_decodes / total_signals if total_signals else 0.0
     false_decode_rate = false_decodes / total_decodes if total_decodes else 0.0
+    # Classify deduped correct decodes using the current (first-in-output) policy
+    if decoded_map:
+        dt_eps, fq_eps = _strict_eps()
+        def _is_strict(rec: dict) -> bool:
+            pairs = expected_map.get(rec.get("message", "")) or []
+            return any(
+                abs(rec.get("dt", 0.0) - dt) < dt_eps and abs(rec.get("freq", 0.0) - fq) < fq_eps
+                for (dt, fq) in pairs
+            )
+        def _closest_errors(rec: dict) -> tuple[float, float]:
+            pairs = expected_map.get(rec.get("message", "")) or []
+            if not pairs:
+                return 0.0, 0.0
+            best = None
+            for dt, fq in pairs:
+                ddt = abs(rec.get("dt", 0.0) - dt)
+                dfq = abs(rec.get("freq", 0.0) - fq)
+                score = (ddt / dt_eps) ** 2 + (dfq / fq_eps) ** 2
+                if best is None or score < best[0]:
+                    best = (score, ddt, dfq)
+            return best[1], best[2]  # type: ignore[index]
+        for bits, recs in groups.items():
+            txt = recs[0].get("message")
+            if txt not in expected_set:
+                continue
+            first = recs[0]
+            first_strict = _is_strict(first)
+            if first_strict:
+                strict_dedup_first += 1
+            else:
+                text_only_dedup_first += 1
+                ddt, dfq = _closest_errors(first)
+                text_only_dt_errors.append(ddt)
+                text_only_df_errors.append(dfq)
+
     print(
-        f"Full summary: raw={raw_decodes} unique={total_decodes} expected={total_signals} "
-        f"correct={correct_decodes} false={false_decodes} hard_crc={hard_crc_total}"
+        f"Full summary: "
+        f"raw={raw_decodes} (pre-dedup decodes) "
+        f"unique={total_decodes} (dedup by payload bits) "
+        f"expected={total_signals} (distinct golden texts) "
+        f"correct={correct_decodes} (unique with text in golden) "
+        f"false={false_decodes} (unique - correct) "
+        f"hard_crc={hard_crc_total} (#hard-decision CRC passes)"
     )
     print(
         f"Full metrics: decode_rate={decode_rate:.3f} false_decode_rate={false_decode_rate:.3f}"
     )
+    # Supplemental breakdown among correct decodes after dedup
+    if correct_decodes:
+        total_correct = strict_dedup_first + text_only_dedup_first
+        dt_eps, fq_eps = _strict_eps()
+        print(
+            f"Full strict/text breakdown (among correct): "
+            f"strict={strict_dedup_first}/{total_correct} ({(strict_dedup_first/total_correct):.3f}) "
+            f"(text match + |dt|<{dt_eps:.3f}s & |df|<{fq_eps:.3f}Hz), "
+            f"text_only={text_only_dedup_first}/{total_correct} ({(text_only_dedup_first/total_correct):.3f}) "
+            f"(text match only; dt/freq outside eps)"
+        )
+        # Text-only error statistics
+        if text_only_dedup_first:
+            import numpy as _np
+            dt_mean = float(_np.mean(text_only_dt_errors))
+            dt_max = float(_np.max(text_only_dt_errors))
+            df_mean = float(_np.mean(text_only_df_errors))
+            df_max = float(_np.max(text_only_df_errors))
+            print(
+                f"Full text-only error: dt_mean={dt_mean:.3f}s dt_max={dt_max:.3f}s; "
+                f"df_mean={df_mean:.3f}Hz df_max={df_max:.3f}Hz"
+            )
     assert decode_rate >= FULL_MIN_RATIO, f"Aggregate decode rate {decode_rate:.3f} < {FULL_MIN_RATIO:.3f}"
     assert false_decode_rate <= FULL_MAX_FALSE_OVERLAP_RATIO, (
         f"False decode rate {false_decode_rate:.3f} > {FULL_MAX_FALSE_OVERLAP_RATIO:.3f}"
@@ -154,6 +239,8 @@ def test_decode_sample_wavs_aggregate():
                 "total_signals": int(total_signals),
                 "decode_rate": float(decode_rate),
                 "false_decode_rate": float(false_decode_rate),
+                "strict_matches": int(strict_dedup_first),
+                "text_only_matches": int(text_only_dedup_first),
                 "duration_sec": float(duration_sec),
                 "num_files": int(num_files),
                 "avg_runtime_per_file_sec": float(avg_runtime),
