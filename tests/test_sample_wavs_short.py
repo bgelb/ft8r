@@ -42,6 +42,8 @@ def test_decode_sample_wavs_short_aggregate(ft8r_metrics):
     expected_map: dict[str, list[tuple[float, float]]] = {}
     # Collect all decodes by payload bits to analyze dedup selection
     groups: dict[str, list[dict]] = {}
+    # Flat list of all golden (dt,freq) pairs across files/messages
+    expected_pairs_all: list[tuple[float, float]] = []
     for stem in stems:
         wav_path = DATA_DIR / f"{stem}.wav"
         txt_path = DATA_DIR / f"{stem}.txt"
@@ -64,6 +66,9 @@ def test_decode_sample_wavs_short_aggregate(ft8r_metrics):
         for r in results:
             bits = r.get("bits") or r["message"]
             groups.setdefault(bits, []).append(r)
+        # Accumulate golden (dt,freq) pairs
+        for (_m, _dt, _fq) in expected_records:
+            expected_pairs_all.append((_dt, _fq))
 
     assert len(expected_set) > 0, "No sample records found"
     total_decodes = len(decoded_map)
@@ -112,11 +117,24 @@ def test_decode_sample_wavs_short_aggregate(ft8r_metrics):
                     best = (score, ddt, dfq)
             return best[1], best[2]  # type: ignore[index]
 
+        false_near = 0
+        false_far = 0
         # Evaluate per unique payload group
         for bits, recs in groups.items():
             # Only consider groups that are counted as correct (text in expected)
             txt = recs[0].get("message")
             if txt not in expected_set:
+                # false decode; assess proximity to any golden pair
+                first = recs[0]
+                near = any(
+                    abs(first.get("dt", 0.0) - dt) < dt_eps
+                    and abs(first.get("freq", 0.0) - fq) < fq_eps
+                    for (dt, fq) in expected_pairs_all
+                )
+                if near:
+                    false_near += 1
+                else:
+                    false_far += 1
                 continue
             # First policy: keep first occurrence
             first = recs[0]
@@ -149,6 +167,15 @@ def test_decode_sample_wavs_short_aggregate(ft8r_metrics):
                 f"Short text-only error: dt_mean={dt_mean:.3f}s dt_max={dt_max:.3f}s; "
                 f"df_mean={df_mean:.3f}Hz df_max={df_max:.3f}Hz"
             )
+    # False decode proximity breakdown
+    if false_decodes:
+        total_false = false_near + false_far
+        if total_false:
+            print(
+                f"Short false breakdown: near={false_near}/{total_false} "
+                f"(within |dt|<{dt_eps:.3f}s & |df|<{fq_eps:.3f}Hz), "
+                f"far={false_far}/{total_false}"
+            )
     # Persist detailed metrics for CI PR comment
     try:
         import json, os
@@ -166,6 +193,8 @@ def test_decode_sample_wavs_short_aggregate(ft8r_metrics):
                 "false_decode_rate": float(false_decode_rate),
                 "strict_matches": int(strict_dedup_first),
                 "text_only_matches": int(text_only_dedup_first),
+                "false_near": int(false_near),
+                "false_far": int(false_far),
                 "duration_sec": float(duration_sec),
                 "num_files": int(num_files),
                 "avg_runtime_per_file_sec": float(avg_runtime),
