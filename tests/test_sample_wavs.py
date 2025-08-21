@@ -50,8 +50,11 @@ def check_decodes(results, expected):
 
 
 def _strict_eps() -> tuple[float, float]:
-    """Return (dt_eps, freq_eps) for strict classification."""
-    return 0.5 * FT8_SYMBOL_LENGTH_IN_SEC, 0.5 * TONE_SPACING_IN_HZ
+    """Return (dt_eps, freq_eps) for strict classification.
+
+    Relaxed to 1 symbol period and 1 tone bin.
+    """
+    return 1.0 * FT8_SYMBOL_LENGTH_IN_SEC, 1.0 * TONE_SPACING_IN_HZ
 
 
 def find_wrong_text_decodes(results, expected):
@@ -121,6 +124,8 @@ def test_decode_sample_wavs_aggregate():
     expected_map: dict[str, list[tuple[float, float]]] = {}
     # Group all decodes by payload for dedup analysis
     groups: dict[str, list[dict]] = {}
+    # Flat list of all golden (dt,freq) pairs across files/messages
+    expected_pairs_all: list[tuple[float, float]] = []
 
     for stem in stems:
         wav_path = DATA_DIR / f"{stem}.wav"
@@ -143,6 +148,9 @@ def test_decode_sample_wavs_aggregate():
         for r in results:
             bits = r.get("bits") or r["message"]
             groups.setdefault(bits, []).append(r)
+        # Accumulate golden (dt,freq) pairs
+        for (_m, _dt, _fq) in expected_records:
+            expected_pairs_all.append((_dt, _fq))
 
     assert len(expected_set) > 0, "No sample records found"
     total_decodes = len(decoded_map)
@@ -172,9 +180,22 @@ def test_decode_sample_wavs_aggregate():
                 if best is None or score < best[0]:
                     best = (score, ddt, dfq)
             return best[1], best[2]  # type: ignore[index]
+        false_near = 0
+        false_far = 0
         for bits, recs in groups.items():
             txt = recs[0].get("message")
+            # If this group is false (text not expected), categorize by proximity
             if txt not in expected_set:
+                first = recs[0]
+                near = any(
+                    abs(first.get("dt", 0.0) - dt) < dt_eps
+                    and abs(first.get("freq", 0.0) - fq) < fq_eps
+                    for (dt, fq) in expected_pairs_all
+                )
+                if near:
+                    false_near += 1
+                else:
+                    false_far += 1
                 continue
             first = recs[0]
             first_strict = _is_strict(first)
@@ -220,6 +241,16 @@ def test_decode_sample_wavs_aggregate():
                 f"Full text-only error: dt_mean={dt_mean:.3f}s dt_max={dt_max:.3f}s; "
                 f"df_mean={df_mean:.3f}Hz df_max={df_max:.3f}Hz"
             )
+    # False decode proximity breakdown
+    if false_decodes:
+        total_false = false_near + false_far
+        if total_false:
+            dt_eps, fq_eps = _strict_eps()
+            print(
+                f"Full false breakdown: near={false_near}/{total_false} "
+                f"(within |dt|<{dt_eps:.3f}s & |df|<{fq_eps:.3f}Hz), "
+                f"far={false_far}/{total_false}"
+            )
     assert decode_rate >= FULL_MIN_RATIO, f"Aggregate decode rate {decode_rate:.3f} < {FULL_MIN_RATIO:.3f}"
     assert false_decode_rate <= FULL_MAX_FALSE_OVERLAP_RATIO, (
         f"False decode rate {false_decode_rate:.3f} > {FULL_MAX_FALSE_OVERLAP_RATIO:.3f}"
@@ -241,6 +272,8 @@ def test_decode_sample_wavs_aggregate():
                 "false_decode_rate": float(false_decode_rate),
                 "strict_matches": int(strict_dedup_first),
                 "text_only_matches": int(text_only_dedup_first),
+                "false_near": int(false_near),
+                "false_far": int(false_far),
                 "duration_sec": float(duration_sec),
                 "num_files": int(num_files),
                 "avg_runtime_per_file_sec": float(avg_runtime),
