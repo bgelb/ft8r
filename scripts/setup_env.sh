@@ -25,6 +25,46 @@ ensure_cmd() {
   fi
 }
 
+# Find a Python interpreter >= 3.11 for creating the venv.
+# Honors explicit override via FT8R_PYTHON if set.
+find_python311() {
+  local override
+  override="${FT8R_PYTHON:-}"
+  if [[ -n "$override" ]]; then
+    if ! command -v "$override" >/dev/null 2>&1; then
+      echo "FT8R_PYTHON is set to '$override' but it is not executable or not on PATH" >&2
+      return 1
+    fi
+    if "$override" -c 'import sys; import sys; sys.exit(0 if sys.version_info[:2] >= (3,11) else 1)' 2>/dev/null; then
+      echo "$override"
+      return 0
+    else
+      echo "FT8R_PYTHON ('$override') is too old; need Python >= 3.11" >&2
+      return 1
+    fi
+  fi
+
+  # Prefer the newest versions first if available on PATH.
+  local candidates=(
+    python3.13
+    python3.12
+    python3.11
+    python3
+    python
+  )
+  local c
+  for c in "${candidates[@]}"; do
+    if command -v "$c" >/dev/null 2>&1; then
+      if "$c" -c 'import sys; import sys; sys.exit(0 if sys.version_info[:2] >= (3,11) else 1)' 2>/dev/null; then
+        echo "$c"
+        return 0
+      fi
+    fi
+  done
+
+  return 1
+}
+
 download() {
   local url="$1" out="$2"
   log "Downloading $url"
@@ -140,9 +180,16 @@ EOF
 }
 
 setup_python() {
-  ensure_cmd python3
+  local PY311
+  if ! PY311="$(find_python311)"; then
+    echo "Could not find a Python >= 3.11 interpreter on PATH. Install python3.11+ or set FT8R_PYTHON to a suitable binary." >&2
+    exit 1
+  fi
+  local ver
+  ver="$($PY311 -c 'import platform; print(platform.python_version())' 2>/dev/null || echo unknown)"
+  log "Using Python $ver at '$PY311'"
   log "Creating venv at $VENV_DIR"
-  python3 -m venv "$VENV_DIR"
+  "$PY311" -m venv "$VENV_DIR"
   # shellcheck disable=SC1090
   source "$VENV_DIR/bin/activate"
   pip install --upgrade pip
