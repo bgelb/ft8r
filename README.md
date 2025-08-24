@@ -49,3 +49,10 @@ The setup script supports convenient flags:
 
 ### Python dependencies
 The venv installs the required Python packages listed in `requirements.txt`.
+
+Python version
+- The setup script selects the highest Python available that is ≥ 3.11 (tries `python3.13`, `python3.12`, `python3.11`, then `python3`/`python`).
+- Override with `FT8R_PYTHON` to force a specific interpreter:
+  - `FT8R_PYTHON=python3.12 ./scripts/setup_env.sh`
+  - `FT8R_PYTHON=/usr/bin/python3.11 ./scripts/setup_env.sh`
+- After activation (`source .venv/bin/activate`), `python --version` should report 3.11+.
