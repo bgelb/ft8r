@@ -43,6 +43,11 @@ Usage
 - Offline (use a 12 kHz mono WAV)
   PYTHONPATH=. python apps/kiwi_ft8_monitor/main.py --wav ft8_lib-2.0/test/wav/websdr_test6.wav --no-ui
 
+- Debug: compare vs WSJT-X (requires setup)
+  First run: `bash scripts/setup_env.sh` to install WSJT-X CLIs into `.wsjtx/`.
+  Then launch with `--compare-wsjtx` to run `jt9 --ft8` on each 15 s window and show a summary:
+  PYTHONPATH=. python apps/kiwi_ft8_monitor/main.py --source sdrplay --device-index 0 --freq-khz 14074 --rate 12000 --sdr-rate 192000 --compare-wsjtx
+
 Keys
 - q: quit
 
