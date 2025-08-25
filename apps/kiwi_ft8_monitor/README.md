@@ -48,6 +48,24 @@ Usage
   Then launch with `--compare-wsjtx` to run `jt9 --ft8` on each 15 s window and show a summary:
   PYTHONPATH=. python apps/kiwi_ft8_monitor/main.py --source sdrplay --device-index 0 --freq-khz 14074 --rate 12000 --sdr-rate 192000 --compare-wsjtx
 
+WSJT-X compare mode (debug)
+- Overview: When `--compare-wsjtx` is enabled, each 15 s window is fed to both decoders: this repo’s FT8 decoder (ft8r) and WSJT-X `jt9 --ft8`. The UI shows them side‑by‑side and instruments ft8r’s decision making.
+- Two columns: The decode list renders as two columns — left `ft8r`, right `jt9` — sorted by increasing frequency with gaps inserted for unmatched rows.
+  - Pairing tolerance: rows are paired when |df| ≤ max(2 Hz, one tone bin). (dt pairing for rows is not required; see gap diagnostics below.)
+- Metrics shown (ft8r column only):
+  - `S=x.xx`: ft8r Costas search score at (dt,freq). This is the value compared against `DEFAULT_SEARCH_THRESHOLD` during candidate search. The value turns red when `S<threshold` (candidate would be eliminated by the search gate).
+  - `G=n/21`: number of Costas gate matches (out of 21 sync symbols) at the fine‑aligned candidate location (diagnostic only; not a gate).
+  - `L=y.yy`: average absolute LLR magnitude after soft demod at the candidate (diagnostic only). If the `FT8R_MIN_LLR_AVG` gate is enabled, this is the same statistic used.
+- JT9‑only gap rows (left/ft8r column):
+  - ft8r candidate matching: we search the full set of ft8r local‑max candidates from the Costas score map and select the best one within small tolerances of the JT9 decode: |dt| ≤ 0.10 s and |df| ≤ max(2 Hz, one tone bin).
+  - `S=`: comes from that best‑score ft8r candidate in the epsilon window (or `S=None` if no candidate peak exists nearby).
+  - `G/L=`: shown only if `S≥threshold` (i.e., the candidate would have advanced to fine sync/LDPC). Otherwise `G=None`, `L=None`.
+  - `N<thr`: shown when a nearer‑in‑epsilon candidate (closest by normalized dt/df distance) exists but was pruned by the search threshold (its `S<threshold`). This flags “closest but pruned” cases.
+  - `Seed=Success!/Fail`: after the above, we attempt a seeded decode by bypassing ft8r’s search and seeding fine sync+LDPC directly with JT9’s (dt,freq). If CRC passes (hard or LDPC), we show `Seed=Success!`; otherwise `Seed=Fail`.
+- JT9 column: shows only JT9’s dt/freq/SNR/message — no ft8r metrics.
+- Requirements: Ensure `jt9` is available via `scripts/setup_env.sh`, `WSJTX_BIN_DIR`, or `PATH`.
+- Performance: Compare mode adds per‑window work (JT9 invocation and ft8r diagnostics). If needed, we can make the G/L or seed steps optional via a flag.
+
 Keys
 - q: quit
 
