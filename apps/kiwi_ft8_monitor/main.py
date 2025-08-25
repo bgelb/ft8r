@@ -69,7 +69,10 @@ class KiwiAudioSource:
                 if self._stop.is_set():
                     break
                 # Normalize chunk to python floats
-                self.buffer.extend(float(x) for x in chunk)
+                try:
+                    self.buffer.extend(chunk.astype(float, copy=False).tolist())
+                except Exception:
+                    self.buffer.extend(float(x) for x in chunk)
 
         self._thr = threading.Thread(target=_reader, daemon=True)
         self._thr.start()
@@ -82,6 +85,7 @@ class KiwiAudioSource:
             pass
         if self._thr is not None:
             self._thr.join(timeout=1.0)
+            self._thr = None
 
     def snapshot_last_15s(self) -> RealSamples:
         # Copy buffer atomically
@@ -221,7 +225,10 @@ class SdrplayAudioSource:
                 y = self._resample_poly(iq, up=1, down=dec, window=("kaiser", 8.6))
                 # Real mono audio
                 audio = np.real(y).astype(float)
-                self.buffer.extend(float(v) for v in audio)
+                try:
+                    self.buffer.extend(audio.tolist())
+                except Exception:
+                    self.buffer.extend(float(v) for v in audio)
 
         self._thr = threading.Thread(target=_reader, daemon=True)
         self._thr.start()
@@ -238,6 +245,7 @@ class SdrplayAudioSource:
             pass
         if self._thr is not None:
             self._thr.join(timeout=1.0)
+            self._thr = None
 
     def snapshot_last_15s(self) -> RealSamples:
         import numpy as np
