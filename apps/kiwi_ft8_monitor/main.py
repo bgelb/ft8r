@@ -371,7 +371,7 @@ def _snr_db_from_rec(rec: dict) -> float | None:
     return None
 
 
-def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None = None, next_boundary: float | None = None, rx_status: dict | None = None):
+def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None = None, next_boundary: float | None = None, rx_status: dict | None = None, cmp_status: dict | None = None):
     stdscr.clear()
     h, w = stdscr.getmaxyx()
     now_ts = now_ts if now_ts is not None else time.time()
@@ -410,6 +410,21 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
             items = ", ".join(f"{k}={v:.1f}dB" for k, v in list(gains.items())[:6])
             stdscr.addstr(4, 0, f"gains: {items}"[:w-1])
             row_sep = 5
+    if cmp_status:
+        ours = cmp_status.get('ours', 0)
+        jt9 = cmp_status.get('jt9', 0)
+        both = cmp_status.get('both', 0)
+        oonly = cmp_status.get('ours_only', 0)
+        jonly = cmp_status.get('jt9_only', 0)
+        stdscr.addstr(row_sep, 0, f"cmp: ours={ours} both={both} jt9={jt9} ours_only={oonly} jt9_only={jonly}"[:w-1])
+        row_sep += 1
+        # Optionally display up to 2 examples of differences
+        ex_o = cmp_status.get('examples_ours_only') or []
+        ex_j = cmp_status.get('examples_jt9_only') or []
+        if ex_o:
+            stdscr.addstr(row_sep, 0, f"ours-only: {ex_o[0][:w-12]}"[:w-1]); row_sep += 1
+        if ex_j:
+            stdscr.addstr(row_sep, 0, f"jt9-only: {ex_j[0][:w-11]}"[:w-1]); row_sep += 1
     stdscr.hline(row_sep, 0, ord('-'), w)
     # Decodes list (sorted externally); include SNR column when available/approx)
     row = row_sep + 1
@@ -450,6 +465,26 @@ def run_monitor_source(src_factory):
                     cand_count = len(find_candidates(audio, max_freq_bin, max_dt_symbols, threshold=DEFAULT_SEARCH_THRESHOLD))
                     t0 = time.perf_counter()
                     decs = decode_full_period(audio, threshold=DEFAULT_SEARCH_THRESHOLD)
+                    # Optional WSJT-X comparison
+                    cmp_status = None
+                    if getattr(run_monitor_source, "_compare_wsjt", False):
+                        jt9_decs = decode_with_jt9(audio)
+                        ours_msgs = {d.get('message', '') for d in decs}
+                        jt9_msgs = {d.get('message', '') for d in jt9_decs}
+                        both = ours_msgs & jt9_msgs
+                        oonly = sorted(ours_msgs - jt9_msgs)
+                        jonly = sorted(jt9_msgs - ours_msgs)
+                        cmp_status = {
+                            'ours': len(ours_msgs),
+                            'jt9': len(jt9_msgs),
+                            'both': len(both),
+                            'ours_only': len(oonly),
+                            'jt9_only': len(jonly),
+                            'examples_ours_only': oonly[:1],
+                            'examples_jt9_only': jonly[:1],
+                        }
+                    else:
+                        cmp_status = None
                     t1 = time.perf_counter()
                     decs = sorted(decs, key=lambda d: d.get('freq', 0.0))
                     last_decodes = decs
@@ -470,7 +505,12 @@ def run_monitor_source(src_factory):
                         rx_status = src.get_status()  # type: ignore[attr-defined]
                 except Exception:
                     rx_status = None
-                render(stdscr, last_decodes, last_metrics, now_ts=now, next_boundary=nb, rx_status=rx_status)
+                # Persist cmp_status until next decode
+                if not hasattr(run_monitor_source, "_last_cmp_status"):
+                    run_monitor_source._last_cmp_status = None  # type: ignore[attr-defined]
+                if 'cmp_status' in locals() and cmp_status is not None:
+                    run_monitor_source._last_cmp_status = cmp_status  # type: ignore[attr-defined]
+                render(stdscr, last_decodes, last_metrics, now_ts=now, next_boundary=nb, rx_status=rx_status, cmp_status=run_monitor_source._last_cmp_status)  # type: ignore[attr-defined]
                 # Handle key
                 try:
                     ch = stdscr.getch()
@@ -725,6 +765,7 @@ def main():
     ap.add_argument("--rate", type=int, default=12000)
     ap.add_argument("--wav", type=str, default="", help="offline: path to 12 kHz mono WAV to process")
     ap.add_argument("--no-ui", action="store_true", help="disable curses UI; print plain lines")
+    ap.add_argument("--compare-wsjtx", action="store_true", help="debug: also run WSJT-X jt9 --ft8 on each 15 s window and show comparison summary")
     ap.add_argument("--oneshot", action="store_true", help="capture one 15 s window, decode, exit")
     args = ap.parse_args()
 
@@ -749,11 +790,30 @@ def main():
                 snr = _snr_db_from_rec(d)
                 snr_str = f"{snr:+4.0f}dB" if (snr is not None and math.isfinite(snr)) else "   --"
                 print(f"{d['dt']:+5.2f}s {d['freq']:7.1f}Hz {snr_str:>6} {d['message']}")
+            if args.compare_wsjt:
+                jt9_decs = decode_with_jt9(audio)
+                ours_msgs = {r['message'] for r in decs}
+                jt9_msgs = {r['message'] for r in jt9_decs}
+                both = ours_msgs & jt9_msgs
+                print(f"compare: ours={len(ours_msgs)} both={len(both)} jt9={len(jt9_msgs)} ours_only={len(ours_msgs-both)} jt9_only={len(jt9_msgs-both)}")
         else:
             def _one(stdscr):
                 curses.curs_set(0)
                 metrics = Metrics(window_start=0, window_end=15, num_candidates=len(cands), num_decodes=len(decs), decode_time_s=(t1-t0))
-                render(stdscr, decs, metrics)
+                cmp_status = None
+                if args.compare_wsjt:
+                    jt9_decs = decode_with_jt9(audio)
+                    ours_msgs = {r['message'] for r in decs}
+                    jt9_msgs = {r['message'] for r in jt9_decs}
+                    both = ours_msgs & jt9_msgs
+                    cmp_status_local = {
+                        'ours': len(ours_msgs), 'jt9': len(jt9_msgs), 'both': len(both),
+                        'ours_only': len(ours_msgs-both), 'jt9_only': len(jt9_msgs-both),
+                        'examples_ours_only': list(sorted(ours_msgs - both))[:1],
+                        'examples_jt9_only': list(sorted(jt9_msgs - both))[:1],
+                    }
+                    cmp_status = cmp_status_local
+                render(stdscr, decs, metrics, cmp_status=cmp_status)
                 stdscr.getch()
             curses.wrapper(_one)
         return
@@ -810,16 +870,109 @@ def main():
                 else:
                     dargs[kv.strip()] = ""
         elif args.device_index is not None:
+def _resolve_wsjt_binary(name: str) -> str | None:
+    """Resolve WSJT-X CLI tool path (e.g., 'jt9', 'ft8code').
+
+    Lookup order:
+    - WSJTX_BIN_DIR env var
+    - repo-local defaults under .wsjtx/
+    - system PATH
+    """
+    import os
+    from pathlib import Path
+
+    env_dir = os.environ.get("WSJTX_BIN_DIR")
+    if env_dir:
+        cand = Path(env_dir) / name
+        if cand.exists() and os.access(cand, os.X_OK):
+            return str(cand)
+    root = Path(__file__).resolve().parents[2]
+    candidates = [
+        root / ".wsjtx" / "bin" / name,
+        root / ".wsjtx" / "WSJT-X.app" / "Contents" / "MacOS" / name,
+        root / ".wsjtx" / "linux-pkg" / "usr" / "bin" / name,
+    ]
+    for cand in candidates:
+        if cand.exists() and os.access(cand, os.X_OK):
+            return str(cand)
+    import shutil
+    return shutil.which(name)
+
+
+def _write_temp_wav(audio: RealSamples) -> str:
+    """Write 12 kHz mono int16 WAV for WSJT-X into a temp file and return path."""
+    import tempfile
+    from scipy.io import wavfile  # type: ignore
+    import numpy as _np
+
+    samples = _np.asarray(audio.samples, dtype=float)
+    maxabs = float(_np.max(_np.abs(samples))) if samples.size else 1.0
+    if maxabs <= 0:
+        maxabs = 1.0
+    scale = (0.8 * 32767.0) / maxabs
+    pcm = _np.clip(samples * scale, -32768.0, 32767.0).astype(_np.int16)
+    fd, path = tempfile.mkstemp(prefix="ft8r_", suffix=".wav")
+    try:
+        wavfile.write(path, int(audio.sample_rate_in_hz), pcm)
+    finally:
+        import os
+        os.close(fd)
+    return path
+
+
+def decode_with_jt9(audio: RealSamples) -> list[dict]:
+    """Run WSJT-X jt9 --ft8 on the given 15 s audio and return decode dicts.
+
+    Returns a list of dicts with keys: message, dt, freq, snr (when parseable).
+    """
+    jt9 = _resolve_wsjt_binary("jt9")
+    if not jt9:
+        return []
+    import subprocess, os
+    wav_path = _write_temp_wav(audio)
+    try:
+        proc = subprocess.run([jt9, "--ft8", wav_path], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=os.path.dirname(wav_path) or None)
+        out = proc.stdout.splitlines()
+        decs: list[dict] = []
+        for line in out:
+            parts = line.split(maxsplit=5)
+            if len(parts) < 6:
+                continue
+            try:
+                # jt9 format: [time] [snr] [dt] [freq] [drift] [message...]
+                snr = float(parts[1])
+            except Exception:
+                snr = None
+            try:
+                dt = float(parts[2]); freq = float(parts[3]); msg = parts[5].strip()
+            except Exception:
+                continue
+            rec = {"message": msg, "dt": dt, "freq": freq}
+            if snr is not None:
+                rec["snr"] = snr
+            decs.append(rec)
+        return decs
+    except Exception:
+        return []
+    finally:
+        try:
+            os.remove(wav_path)
+        except Exception:
+            pass
             devs = SdrplayAudioSource.enumerate_devices()
             if args.device_index < 0 or args.device_index >= len(devs):
                 print("Invalid --device-index; use --list-sdrplay to see devices", file=sys.stderr)
                 sys.exit(2)
             dargs = dict(devs[args.device_index])
+        # Install comparison flag into monitor function state for UI
+        run_monitor_source._compare_wsjt = bool(args.compare_wsjt)  # type: ignore[attr-defined]
         return run_monitor_source(lambda: SdrplayAudioSource(args.freq_khz, audio_rate=args.rate, sdr_rate=args.sdr_rate, device_args=dargs, gain_db=args.gain_db))
     # Else kiwi source
     if KiwiSDRStream is not None:
+        run_monitor_source._compare_wsjt = bool(args.compare_wsjt)  # type: ignore[attr-defined]
         run_monitor(args.host, args.port, args.freq_khz, args.mode, args.rate)
     else:
+        run_monitor_source._compare_wsjt = bool(args.compare_wsjt)  # type: ignore[attr-defined]
         run_monitor_recorder(args.host, args.port, args.freq_khz, args.mode, args.rate)
 
 
