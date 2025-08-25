@@ -145,6 +145,92 @@ class SdrplayAudioSource:
         self.buffer: Deque[float] = collections.deque(maxlen=audio_rate * 15)
         self._init_device()
 
+    def get_status(self) -> dict:
+        """Return a snapshot of RX status for UI: AGC, gains, sensors, levels.
+
+        Tries to be generic w.r.t. SoapySDR driver capabilities. Values may be
+        missing depending on the underlying driver and platform.
+        """
+        st: dict = {}
+        try:
+            # AGC state (if supported)
+            try:
+                st['agc'] = bool(self.dev.getGainMode(self._SOAPY_SDR_RX, 0))  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            # Overall gain
+            try:
+                st['gain_db'] = float(self.dev.getGain(self._SOAPY_SDR_RX, 0))
+            except Exception:
+                pass
+            # Element gains
+            gains: dict = {}
+            try:
+                names = list(self.dev.listGains(self._SOAPY_SDR_RX, 0))
+                for name in names:
+                    try:
+                        val = self.dev.getGain(self._SOAPY_SDR_RX, 0, name)
+                        gains[str(name)] = float(val)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            if gains:
+                st['gains'] = gains
+            # Sensors (device + channel). Try to extract RSSI/overload if present.
+            sensors: dict = {}
+            try:
+                for s in list(self.dev.listSensors()):
+                    try:
+                        sensors[str(s)] = str(self.dev.readSensor(s))
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            try:
+                for s in list(self.dev.listChannelSensors(self._SOAPY_SDR_RX, 0)):
+                    try:
+                        sensors[str(s)] = str(self.dev.readChannelSensor(self._SOAPY_SDR_RX, 0, s))
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            if sensors:
+                st['sensors'] = sensors
+                # Heuristics for common fields
+                rs = None
+                for k, v in sensors.items():
+                    lk = k.lower()
+                    if rs is None and ('rssi' in lk or 'power' in lk):
+                        try:
+                            rs = float(str(v).replace('dBm','').strip())
+                        except Exception:
+                            pass
+                if rs is not None:
+                    st['rssi_dbm'] = rs
+                ov = None
+                for k, v in sensors.items():
+                    lk = k.lower(); sv = str(v).lower()
+                    if 'over' in lk or 'ovld' in lk:
+                        ov = (sv in ('1', 'true', 'yes', 'on'))
+                        break
+                if ov is not None:
+                    st['overload'] = bool(ov)
+            # Audio level from recent buffer (RMS dBFS, assume full scale ~1.0)
+            try:
+                n = min(len(self.buffer), int(self.audio_rate * 0.5))
+                if n > 0:
+                    import numpy as _np
+                    a = _np.fromiter(list(self.buffer)[-n:], dtype=float)
+                    rms = float(_np.sqrt(_np.mean(a * a)))
+                    eps = 1e-12
+                    st['audio_dbfs'] = 20.0 * math.log10(max(rms, eps))
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return st
+
     @staticmethod
     def enumerate_devices() -> list[dict]:
         try:
@@ -285,7 +371,7 @@ def _snr_db_from_rec(rec: dict) -> float | None:
     return None
 
 
-def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None = None, next_boundary: float | None = None):
+def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None = None, next_boundary: float | None = None, rx_status: dict | None = None):
     stdscr.clear()
     h, w = stdscr.getmaxyx()
     now_ts = now_ts if now_ts is not None else time.time()
@@ -304,9 +390,29 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
     bar = '[' + ('#' * filled) + ('-' * (bar_w - filled)) + ']'
     stdscr.addstr(1, 0, f"UTC {utc_str}  next {time.strftime('%H:%M:%S', time.gmtime(next_boundary))}Z  {bar} {elapsed:4.1f}/15s")
     stdscr.addstr(2, 0, f"candidates: {metrics.num_candidates}  decodes: {metrics.num_decodes}  decode_time: {metrics.decode_time_s:.2f}s")
-    stdscr.hline(3, 0, ord('-'), w)
+    row_sep = 3
+    if rx_status:
+        # Compose a compact status line
+        agc = rx_status.get('agc')
+        agc_str = f"agc={'on' if agc else 'off'}" if isinstance(agc, bool) else "agc=--"
+        gain = rx_status.get('gain_db')
+        gain_str = f"gain={gain:.1f}dB" if isinstance(gain, (int, float)) else "gain=--"
+        over = rx_status.get('overload')
+        over_str = f"over={'YES' if over else 'no'}" if isinstance(over, bool) else "over=--"
+        rssi = rx_status.get('rssi_dbm')
+        rssi_str = f"rssi={rssi:.1f}dBm" if isinstance(rssi, (int, float)) else "rssi=--"
+        adbfs = rx_status.get('audio_dbfs')
+        adbfs_str = f"audio={adbfs:.1f}dBFS" if isinstance(adbfs, (int, float)) else "audio=--"
+        stdscr.addstr(3, 0, f"RX {agc_str}  {gain_str}  {over_str}  {rssi_str}  {adbfs_str}"[:w-1])
+        row_sep = 4
+        gains = rx_status.get('gains') or {}
+        if gains:
+            items = ", ".join(f"{k}={v:.1f}dB" for k, v in list(gains.items())[:6])
+            stdscr.addstr(4, 0, f"gains: {items}"[:w-1])
+            row_sep = 5
+    stdscr.hline(row_sep, 0, ord('-'), w)
     # Decodes list (sorted externally); include SNR column when available/approx)
-    row = 4
+    row = row_sep + 1
     for d in decodes:
         snr = _snr_db_from_rec(d)
         snr_str = f"{snr:+4.0f}dB" if (snr is not None and math.isfinite(snr)) else "   --"
@@ -358,7 +464,13 @@ def run_monitor_source(src_factory):
                     # Schedule strictly after 'now' to avoid re-triggering same boundary
                     nb = next_strict_boundary_utc(now)
                 # Always render clock/progress with last results
-                render(stdscr, last_decodes, last_metrics, now_ts=now, next_boundary=nb)
+                rx_status = None
+                try:
+                    if hasattr(src, 'get_status') and callable(getattr(src, 'get_status')):
+                        rx_status = src.get_status()  # type: ignore[attr-defined]
+                except Exception:
+                    rx_status = None
+                render(stdscr, last_decodes, last_metrics, now_ts=now, next_boundary=nb, rx_status=rx_status)
                 # Handle key
                 try:
                     ch = stdscr.getch()
