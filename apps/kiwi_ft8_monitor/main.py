@@ -420,11 +420,8 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
         row_sep += 1
         # Optionally display up to 2 examples of differences
         ex_o = cmp_status.get('examples_ours_only') or []
-        ex_j = cmp_status.get('examples_jt9_only') or []
         if ex_o:
             stdscr.addstr(row_sep, 0, f"ours-only: {ex_o[0][:w-12]}"[:w-1]); row_sep += 1
-        if ex_j:
-            stdscr.addstr(row_sep, 0, f"jt9-only: {ex_j[0][:w-11]}"[:w-1]); row_sep += 1
     stdscr.hline(row_sep, 0, ord('-'), w)
     # Decodes list (sorted externally). If comparison is active and jt9 results
     # are present, render two columns side-by-side aligned by message text.
