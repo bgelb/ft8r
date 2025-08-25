@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover - best effort import
     KiwiSDRStream = None  # type: ignore
 
 from utils import RealSamples
-from search import find_candidates
+from search import find_candidates, candidate_score_map, peak_candidates
 """Runtime configuration values with safe defaults."""
 # Threshold used during candidate search/decoding. Try to import from tests when
 # running inside the repo (developer environment), but default to a safe value
@@ -518,8 +518,8 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
                 # For jt9-only gaps in ft8r column, synthesize a rec-like dict
                 # carrying our diagnostics extracted from jt9 decode
                 diag = {
-                    'dt': right_rec.get('dt') if right_rec else 0.0,
-                    'freq': right_rec.get('freq') if right_rec else 0.0,
+                    'dt': right_rec.get('ft8r_cand_dt') if (right_rec and right_rec.get('ft8r_cand_dt') is not None) else (right_rec.get('dt') if right_rec else 0.0),
+                    'freq': right_rec.get('ft8r_cand_freq') if (right_rec and right_rec.get('ft8r_cand_freq') is not None) else (right_rec.get('freq') if right_rec else 0.0),
                     'message': '',
                     'ft8r_probe': right_rec.get('ft8r_probe') if right_rec else None,
                     'ft8r_search_score': right_rec.get('ft8r_search_score') if right_rec else None,
@@ -642,7 +642,14 @@ def run_monitor_source(src_factory):
                     cmp_status = None
                     if getattr(run_monitor_source, "_compare_wsjt", False):
                         jt9_decs = decode_with_jt9(audio)
-                        # Attach ft8r probe and search-map score to each jt9 decode for UI gaps
+                        # Precompute local-max candidates at threshold=0 for proximity matching
+                        peaks_all = []
+                        if scores_map is not None and dts_arr is not None and freqs_arr is not None:
+                            try:
+                                peaks_all = peak_candidates(scores_map, dts_arr, freqs_arr, threshold=0.0)
+                            except Exception:
+                                peaks_all = []
+                        # Attach ft8r diagnostics to each jt9 decode for UI gaps
                         for r in jt9_decs:
                             try:
                                 probe = _ft8r_costas_probe(audio, float(r.get('dt', 0.0)), float(r.get('freq', 0.0)))
@@ -650,30 +657,34 @@ def run_monitor_source(src_factory):
                                 probe = None
                             if probe:
                                 r['ft8r_probe'] = probe
-                            if scores_map is not None and dts_arr is not None and freqs_arr is not None:
-                                try:
-                                    import numpy as _np
-                                    dtj = float(r.get('dt', 0.0)); fqj = float(r.get('freq', 0.0))
-                                    i = int(_np.argmin(_np.abs(dts_arr - dtj)))
-                                    j = int(_np.argmin(_np.abs(freqs_arr - fqj)))
-                                    if abs(float(dts_arr[i]) - dtj) <= 0.10 and abs(float(freqs_arr[j]) - fqj) <= max(2.0, TONE_SPACING_IN_HZ):
-                                        sval = float(scores_map[i, j])
-                                        r['ft8r_search_score'] = sval
-                                        r['ft8r_search_thr'] = float(DEFAULT_SEARCH_THRESHOLD)
-                                        r['ft8r_search_fail'] = bool(sval < float(DEFAULT_SEARCH_THRESHOLD))
-                                except Exception:
-                                    pass
-                            # Gate matches and LLR avg near jt9 dt/freq
+                            # Candidate near JT9 dt/freq?
+                            cand_dt = None; cand_fq = None; cand_score = None
                             try:
                                 dtj = float(r.get('dt', 0.0)); fqj = float(r.get('freq', 0.0))
-                                g2 = _ft8r_compute_gate(audio, dtj, fqj)
-                                if g2 is not None:
-                                    r['ft8r_gate'] = int(g2)
-                                la2 = _ft8r_compute_llr_avg(audio, dtj, fqj)
-                                if la2 is not None:
-                                    r['ft8r_llr_avg'] = float(la2)
+                                if peaks_all:
+                                    dt_eps = 0.10; fq_eps = max(2.0, TONE_SPACING_IN_HZ)
+                                    near = [p for p in peaks_all if abs(p[1]-dtj) <= dt_eps and abs(p[2]-fqj) <= fq_eps]
+                                    if near:
+                                        best = max(near, key=lambda p: p[0])
+                                        cand_score, cand_dt, cand_fq = float(best[0]), float(best[1]), float(best[2])
                             except Exception:
                                 pass
+                            if cand_score is not None:
+                                r['ft8r_search_score'] = cand_score
+                                r['ft8r_search_thr'] = float(DEFAULT_SEARCH_THRESHOLD)
+                                r['ft8r_search_fail'] = bool(cand_score < float(DEFAULT_SEARCH_THRESHOLD))
+                            # Only compute G/L if candidate passed search gate; else leave None
+                            if cand_score is not None and cand_score >= float(DEFAULT_SEARCH_THRESHOLD):
+                                try:
+                                    g2 = _ft8r_compute_gate(audio, cand_dt, cand_fq) if (cand_dt is not None and cand_fq is not None) else None
+                                    if g2 is not None:
+                                        r['ft8r_gate'] = int(g2)
+                                    la2 = _ft8r_compute_llr_avg(audio, cand_dt, cand_fq) if (cand_dt is not None and cand_fq is not None) else None
+                                    if la2 is not None:
+                                        r['ft8r_llr_avg'] = float(la2)
+                                    r['ft8r_cand_dt'] = cand_dt; r['ft8r_cand_freq'] = cand_fq
+                                except Exception:
+                                    pass
                         ours_msgs = {d.get('message', '') for d in decs}
                         jt9_msgs = {d.get('message', '') for d in jt9_decs}
                         both = ours_msgs & jt9_msgs
