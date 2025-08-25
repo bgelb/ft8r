@@ -55,3 +55,27 @@ Notes
   `apps/kiwi_ft8_monitor/bin/kiwirecorder.py` (installed by the script) or a
   `kiwirecorder.py` found on PATH.
 - SDRplay path: complex IQ → low‑pass + decimate → real audio (USB demod) to 12 kHz.
+
+SDRplay status panel
+- When running with `--source sdrplay`, the UI shows a compact receiver status line beneath the metrics:
+  - `agc=on/off`: whether SoapySDR gain mode (AGC) is enabled.
+  - `gain=XdB`: overall gain reported by the driver (see “Gain model” below).
+  - `over=YES/no`: overload indication if exposed by the driver.
+  - `rssi=XdBm`: received signal strength if the driver exposes an RSSI sensor.
+  - `audio=XdBFS`: recent audio RMS level after decimation, referenced to full scale.
+  - If the driver exposes per‑stage gains, a `gains:` line lists a few elements (e.g., `LNA`, `IF`, etc.).
+
+SDRplay gain model, AGC, and ranges
+- Gain vs “gain reduction”: SDRplay devices often model the internal IF attenuator as “gain reduction (GR)” in dB, where a larger number means lower gain. SoapySDR presents a normalized gain interface and, depending on driver version, may report either:
+  - a conventional “gain in dB” that increases with amplification, or
+  - the raw IF “gain reduction” value. The app surfaces whatever the driver reports for overall and per‑element gains.
+- AGC behavior: Enabling AGC via SoapySDR’s `getGainMode(true)` lets the driver manage internal stages (typically the IF gain reduction, and sometimes LNA state steps per band) to maintain a target level. When AGC is on, manual overall gain is usually ignored or partially overridden by the driver.
+- RSPduo ranges: Ranges are device/driver dependent and can vary with band/mode. Typical RSPduo controls include a discrete LNA state (several steps) and an IF gain reduction range in dB. To see the exact ranges on your system, probe the driver:
+  - `SoapySDRUtil --probe="driver=sdrplay"` (or `driver=sdrplay3`)
+  - Look for `Gain` elements and their ranges, e.g., `LNA`, `IF`, or `GR`. The app will display whichever elements the driver exposes.
+- Recommended starting points:
+  - Start with `agc=on` (default if your driver enables it). Watch the UI for `over=YES` and ensure `audio` sits roughly between −20 dBFS and −6 dBFS during normal activity.
+  - If you prefer manual control: disable AGC, set a modest overall gain (or lower IF “gain reduction”), and increase until `over` does not trigger while `audio` remains below clipping (≈ −6 dBFS). Bands with strong broadcast signals may require more attenuation.
+  - Leave `--sdr-rate` at 192000 unless you have a reason to change it; the app low‑passes and decimates to 12 kHz for FT8.
+
+Tip: Since driver semantics differ, treat the UI’s `gain` and `gains` as authoritative for your platform. If values appear inverted relative to expectation, they may be reported as “gain reduction”. Use `SoapySDRUtil --probe` to confirm names and ranges.
