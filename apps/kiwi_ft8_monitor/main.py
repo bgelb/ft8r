@@ -29,7 +29,7 @@ try:  # pragma: no cover - optional import for dev environment
     DEFAULT_SEARCH_THRESHOLD = _DEFAULT_SEARCH_THRESHOLD
 except Exception:  # pragma: no cover - production/runtime fallback
     DEFAULT_SEARCH_THRESHOLD = 1.0
-from demod import decode_full_period, TONE_SPACING_IN_HZ, fine_sync_candidate
+from demod import decode_full_period, TONE_SPACING_IN_HZ, fine_sync_candidate, soft_demod
 from utils import FT8_SYMBOL_LENGTH_IN_SEC, FT8_SYMBOLS_PER_MESSAGE, COSTAS_SEQUENCE, COSTAS_START_OFFSET_SEC
 
 
@@ -435,7 +435,27 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
         except Exception:
             dt, fq = 0.0, 0.0
         msg = rec.get('message', '')
-        return f"{dt:+5.2f}s {fq:7.1f}Hz {snr_str:>6} {msg}"
+        # Metrics columns (S, G, L) when present
+        cols = []
+        s_val = rec.get('ft8r_search_score'); s_thr = rec.get('ft8r_search_thr')
+        g_val = rec.get('ft8r_gate'); l_val = rec.get('ft8r_llr_avg')
+        try:
+            if s_val is not None:
+                cols.append(f"S={float(s_val):.2f}")
+        except Exception:
+            pass
+        try:
+            if g_val is not None:
+                cols.append(f"G={int(g_val)}")
+        except Exception:
+            pass
+        try:
+            if l_val is not None:
+                cols.append(f"L={float(l_val):.2f}")
+        except Exception:
+            pass
+        mcol = (" ".join(cols) + " ") if cols else ""
+        return f"{dt:+5.2f}s {fq:7.1f}Hz {snr_str:>6} {mcol}{msg}"
 
     jt9_list = None
     if cmp_status is not None:
@@ -517,11 +537,21 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
             else:
                 break
     else:
-        # Single-column mode
+        # Single-column mode (include metrics; color S<thr when present)
         for d in decodes:
             line = _fmt_line(d)
+            attr = 0
+            try:
+                if d.get('ft8r_search_score') is not None and d.get('ft8r_search_thr') is not None:
+                    if float(d['ft8r_search_score']) < float(d['ft8r_search_thr']):
+                        attr = curses.color_pair(1)
+            except Exception:
+                attr = 0
             if row < h-1:
-                stdscr.addstr(row, 0, line[:w-1])
+                try:
+                    stdscr.addstr(row, 0, line[:w-1], attr)
+                except Exception:
+                    stdscr.addstr(row, 0, line[:w-1])
                 row += 1
             else:
                 break
@@ -562,6 +592,45 @@ def run_monitor_source(src_factory):
                         scores_map = None; dts_arr = None; freqs_arr = None
                     t0 = time.perf_counter()
                     decs = decode_full_period(audio, threshold=DEFAULT_SEARCH_THRESHOLD)
+                    # Attach per-decode diagnostics (search score S, gate G, LLR avg L)
+                    # Build search score at each decode's (dt,freq) if map available
+                    if decs:
+                        try:
+                            import numpy as _np
+                            # Precompute map if not already done above
+                            try:
+                                scores_map
+                            except NameError:
+                                scores_map = None
+                            if 'scores_map' not in locals() or scores_map is None:
+                                try:
+                                    scores_map, dts_arr, freqs_arr = candidate_score_map(audio, max_freq_bin, max_dt_symbols)
+                                except Exception:
+                                    scores_map = None; dts_arr = None; freqs_arr = None
+                            for r in decs:
+                                try:
+                                    dtd = float(r.get('dt', 0.0)); fqd = float(r.get('freq', 0.0))
+                                except Exception:
+                                    dtd, fqd = 0.0, 0.0
+                                if scores_map is not None and dts_arr is not None and freqs_arr is not None:
+                                    try:
+                                        ii = int(_np.argmin(_np.abs(dts_arr - dtd)))
+                                        jj = int(_np.argmin(_np.abs(freqs_arr - fqd)))
+                                        sval = float(scores_map[ii, jj])
+                                        r['ft8r_search_score'] = sval
+                                        r['ft8r_search_thr'] = float(DEFAULT_SEARCH_THRESHOLD)
+                                        r['ft8r_search_fail'] = bool(sval < float(DEFAULT_SEARCH_THRESHOLD))
+                                    except Exception:
+                                        pass
+                                # Compute gate matches and LLR average
+                                g = _ft8r_compute_gate(audio, dtd, fqd)
+                                if g is not None:
+                                    r['ft8r_gate'] = int(g)
+                                la = _ft8r_compute_llr_avg(audio, dtd, fqd)
+                                if la is not None:
+                                    r['ft8r_llr_avg'] = float(la)
+                        except Exception:
+                            pass
                     # Optional WSJT-X comparison
                     cmp_status = None
                     if getattr(run_monitor_source, "_compare_wsjt", False):
@@ -587,6 +656,17 @@ def run_monitor_source(src_factory):
                                         r['ft8r_search_fail'] = bool(sval < float(DEFAULT_SEARCH_THRESHOLD))
                                 except Exception:
                                     pass
+                            # Gate matches and LLR avg near jt9 dt/freq
+                            try:
+                                dtj = float(r.get('dt', 0.0)); fqj = float(r.get('freq', 0.0))
+                                g2 = _ft8r_compute_gate(audio, dtj, fqj)
+                                if g2 is not None:
+                                    r['ft8r_gate'] = int(g2)
+                                la2 = _ft8r_compute_llr_avg(audio, dtj, fqj)
+                                if la2 is not None:
+                                    r['ft8r_llr_avg'] = float(la2)
+                            except Exception:
+                                pass
                         ours_msgs = {d.get('message', '') for d in decs}
                         jt9_msgs = {d.get('message', '') for d in jt9_decs}
                         both = ours_msgs & jt9_msgs
@@ -1134,6 +1214,34 @@ def _ft8r_costas_probe(audio: RealSamples, dt: float, freq: float) -> str | None
         max_idx = np.argmax(resp[:, costas_pos], axis=0)
         matches = int((max_idx == np.array(tones)).sum())
         return f"G={matches}/21"
+    except Exception:
+        return None
+
+
+def _ft8r_compute_gate(audio: RealSamples, dt: float, freq: float) -> int | None:
+    try:
+        bb, dt_ref, freq_ref = fine_sync_candidate(audio, freq, dt)
+        sr = bb.sample_rate_in_hz
+        sym_len = int(round(sr * FT8_SYMBOL_LENGTH_IN_SEC))
+        seg = bb.samples[: sym_len * FT8_SYMBOLS_PER_MESSAGE].reshape(FT8_SYMBOLS_PER_MESSAGE, sym_len)
+        time_idx = np.arange(sym_len) / sr
+        bases = np.exp(-2j * np.pi * (np.arange(8)[:, None] * TONE_SPACING_IN_HZ) * time_idx[None, :])
+        resp = np.abs(bases @ seg.T) ** 2  # (8, 79)
+        costas_pos = list(range(7)) + list(range(36, 43)) + list(range(72, 79))
+        tones = COSTAS_SEQUENCE * 3
+        max_idx = np.argmax(resp[:, costas_pos], axis=0)
+        matches = int((max_idx == np.array(tones)).sum())
+        return matches
+    except Exception:
+        return None
+
+
+def _ft8r_compute_llr_avg(audio: RealSamples, dt: float, freq: float) -> float | None:
+    try:
+        bb, dt_ref, freq_ref = fine_sync_candidate(audio, freq, dt)
+        llrs = soft_demod(bb)
+        import numpy as _np
+        return float(_np.mean(_np.abs(llrs)))
     except Exception:
         return None
 if __name__ == "__main__":
