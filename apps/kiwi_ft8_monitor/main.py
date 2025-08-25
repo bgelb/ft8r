@@ -870,6 +870,21 @@ def main():
                 else:
                     dargs[kv.strip()] = ""
         elif args.device_index is not None:
+            devs = SdrplayAudioSource.enumerate_devices()
+            if args.device_index < 0 or args.device_index >= len(devs):
+                print("Invalid --device-index; use --list-sdrplay to see devices", file=sys.stderr)
+                sys.exit(2)
+            dargs = dict(devs[args.device_index])
+        # Install comparison flag into monitor function state for UI
+        run_monitor_source._compare_wsjt = bool(args.compare_wsjt)  # type: ignore[attr-defined]
+        return run_monitor_source(lambda: SdrplayAudioSource(args.freq_khz, audio_rate=args.rate, sdr_rate=args.sdr_rate, device_args=dargs, gain_db=args.gain_db))
+    # Else kiwi source
+    if KiwiSDRStream is not None:
+        run_monitor_source._compare_wsjt = bool(args.compare_wsjt)  # type: ignore[attr-defined]
+        run_monitor(args.host, args.port, args.freq_khz, args.mode, args.rate)
+    else:
+        run_monitor_source._compare_wsjt = bool(args.compare_wsjt)  # type: ignore[attr-defined]
+        run_monitor_recorder(args.host, args.port, args.freq_khz, args.mode, args.rate)
 def _resolve_wsjt_binary(name: str) -> str | None:
     """Resolve WSJT-X CLI tool path (e.g., 'jt9', 'ft8code').
 
@@ -959,22 +974,5 @@ def decode_with_jt9(audio: RealSamples) -> list[dict]:
             os.remove(wav_path)
         except Exception:
             pass
-            devs = SdrplayAudioSource.enumerate_devices()
-            if args.device_index < 0 or args.device_index >= len(devs):
-                print("Invalid --device-index; use --list-sdrplay to see devices", file=sys.stderr)
-                sys.exit(2)
-            dargs = dict(devs[args.device_index])
-        # Install comparison flag into monitor function state for UI
-        run_monitor_source._compare_wsjt = bool(args.compare_wsjt)  # type: ignore[attr-defined]
-        return run_monitor_source(lambda: SdrplayAudioSource(args.freq_khz, audio_rate=args.rate, sdr_rate=args.sdr_rate, device_args=dargs, gain_db=args.gain_db))
-    # Else kiwi source
-    if KiwiSDRStream is not None:
-        run_monitor_source._compare_wsjt = bool(args.compare_wsjt)  # type: ignore[attr-defined]
-        run_monitor(args.host, args.port, args.freq_khz, args.mode, args.rate)
-    else:
-        run_monitor_source._compare_wsjt = bool(args.compare_wsjt)  # type: ignore[attr-defined]
-        run_monitor_recorder(args.host, args.port, args.freq_khz, args.mode, args.rate)
-
-
 if __name__ == "__main__":
     main()
