@@ -1,55 +1,57 @@
 FT8 Monitor (console)
 
-This is a simple console application that connects to a KiwiSDR, streams audio
-at 12 kHz from a single receive channel (USB), chops the stream into 15‑second
-windows aligned to :00/:15/:30/:45 each minute, decodes FT8 with the local
-library, and displays results along with a small metrics panel.
+This console app streams 12 kHz audio from either a KiwiSDR or an SDRplay RSP,
+aligns to 15‑second UTC boundaries (:00/:15/:30/:45), decodes FT8 using the
+local library, and shows results with a small metrics panel.
 
 Requirements
 - Python 3.10+
-- This repository’s Python dependencies (install from repo root)
+- Repo Python deps: from repo root run `python -m pip install -r requirements.txt`
+  (includes NumPy/SciPy/ldpc)
 - One of:
-  - KiwiSDR reachable at 192.168.2.10:8073 (default), or
-  - SDRplay RSP (tested with RSPduo) with SoapySDR + SDRplay API installed system-wide
+  - KiwiSDR reachable at 192.168.2.10:8073 (default). Optional: `pip install kiwisdr`
+    for direct streaming, or use the recorder fallback below.
+  - SDRplay RSP (tested with RSPduo) with:
+    - SoapySDR Python bindings available to Python
+    - SDRplay API/driver installed system‑wide
+    - SciPy (already in `requirements.txt`) for decimation
 
-Install Kiwi client locally (for one-shot/live via recorder)
+Optional: install Kiwi recorder locally (enables recorder fallback)
   bash apps/kiwi_ft8_monitor/install_kiwirecorder.sh
 
-Run (Kiwi live monitor)
+Usage
+- List SDRplay devices
+  PYTHONPATH=. python apps/kiwi_ft8_monitor/main.py --source sdrplay --list-sdrplay
+
+- Kiwi live monitor
   PYTHONPATH=. python apps/kiwi_ft8_monitor/main.py \
     --source kiwi --host 192.168.2.10 --freq-khz 14074 --mode usb --rate 12000
 
-List SDRplay devices
-  PYTHONPATH=. python apps/kiwi_ft8_monitor/main.py --source sdrplay --list-sdrplay
-
-Run (SDRplay live monitor, choose by index)
+- SDRplay live (by index)
   PYTHONPATH=. python apps/kiwi_ft8_monitor/main.py \
     --source sdrplay --device-index 0 --freq-khz 14074 --rate 12000 --sdr-rate 192000
 
-Run (SDRplay live monitor, explicit device args)
+- SDRplay live (by device args)
   PYTHONPATH=. python apps/kiwi_ft8_monitor/main.py \
     --source sdrplay --device-args "driver=sdrplay,serial=YOUR_SERIAL" \
     --freq-khz 14074 --rate 12000 --sdr-rate 192000
 
-One‑shot (capture one 15 s, decode, exit)
+- Oneshot (capture one 15 s window, decode, exit)
   Kiwi:    PYTHONPATH=. python apps/kiwi_ft8_monitor/main.py --source kiwi --host 192.168.2.10 --freq-khz 14074 --mode usb --rate 12000 --oneshot --no-ui
   SDRplay: PYTHONPATH=. python apps/kiwi_ft8_monitor/main.py --source sdrplay --device-index 0 --freq-khz 14074 --rate 12000 --sdr-rate 192000 --oneshot --no-ui
 
-Offline test (use a WAV)
+- Offline (use a 12 kHz mono WAV)
   PYTHONPATH=. python apps/kiwi_ft8_monitor/main.py --wav ft8_lib-2.0/test/wav/websdr_test6.wav --no-ui
 
 Keys
 - q: quit
 
 Notes
-- The app aligns windows to UTC wall‑clock boundaries (:00/:15/:30/:45). Audio
-  is continuously buffered in a background reader, and decoding happens
-  immediately after each boundary using the last 15 seconds of buffered audio.
-- The metrics panel shows: candidate count (coarse search), decode count,
-  and decode wall time for the most recent window.
- - For recorder-based capture, the app auto-detects a local binary at
-   apps/kiwi_ft8_monitor/bin/kiwirecorder.py (installed by the script),
-   or falls back to a kiwirecorder.py found on PATH.
- - SDRplay mode uses a simple complex low‑pass + decimate and real extraction
-   to produce 12 kHz mono audio suitable for FT8 decoding. SoapySDR and the
-   SDRplay driver must be installed on the system.
+- Windows align to UTC boundaries. Audio is continuously buffered; decoding runs
+  immediately after each boundary over the last 15 seconds of audio.
+- Metrics panel shows: candidate count, decode count, and decode wall time for
+  the most recent window.
+- Recorder fallback: the app auto‑detects a local binary at
+  `apps/kiwi_ft8_monitor/bin/kiwirecorder.py` (installed by the script) or a
+  `kiwirecorder.py` found on PATH.
+- SDRplay path: complex IQ → low‑pass + decimate → real audio (USB demod) to 12 kHz.

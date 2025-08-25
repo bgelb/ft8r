@@ -20,7 +20,15 @@ except Exception:  # pragma: no cover - best effort import
 
 from utils import RealSamples
 from search import find_candidates
-from tests.utils import DEFAULT_SEARCH_THRESHOLD
+"""Runtime configuration values with safe defaults."""
+# Threshold used during candidate search/decoding. Try to import from tests when
+# running inside the repo (developer environment), but default to a safe value
+# when running the app standalone so it does not depend on test modules.
+try:  # pragma: no cover - optional import for dev environment
+    from tests.utils import DEFAULT_SEARCH_THRESHOLD as _DEFAULT_SEARCH_THRESHOLD  # type: ignore
+    DEFAULT_SEARCH_THRESHOLD = _DEFAULT_SEARCH_THRESHOLD
+except Exception:  # pragma: no cover - production/runtime fallback
+    DEFAULT_SEARCH_THRESHOLD = 1.0
 from demod import decode_full_period, TONE_SPACING_IN_HZ
 
 
@@ -454,7 +462,7 @@ def run_oneshot(host: str, port: int, freq_khz: float, mode: str, rate: int, no_
     If the kiwisdr Python package is unavailable, falls back to using the external
     'kiwirecorder.py' if found on PATH to capture a 15 s WAV.
     """
-    from tests.utils import DEFAULT_SEARCH_THRESHOLD
+    # DEFAULT_SEARCH_THRESHOLD is defined at module scope with a runtime-safe default
     if KiwiSDRStream is None:
         # Fallback: use kiwirecorder.py to capture a single 15 s WAV aligned to boundary
         import shutil, tempfile, subprocess, os
@@ -519,7 +527,7 @@ def run_oneshot(host: str, port: int, freq_khz: float, mode: str, rate: int, no_
         while len(src.buffer) < need:
             time.sleep(0.05)
             if time.time() - t0 > 60:
-                print("ERROR: timed out waiting for SDRplay audio buffer to fill", file=sys.stderr)
+                print("ERROR: timed out waiting for audio buffer to fill", file=sys.stderr)
                 return
         now = time.time(); nb = next_strict_boundary_utc(now); time.sleep(max(0.0, nb - now))
         audio = src.snapshot_last_15s()
@@ -546,7 +554,7 @@ def run_oneshot(host: str, port: int, freq_khz: float, mode: str, rate: int, no_
 
 
 def run_oneshot_sdrplay(freq_khz: float, rate: int, sdr_rate: int, device_args: dict | None = None, gain_db: float | None = None, no_ui: bool = True):
-    from tests.utils import DEFAULT_SEARCH_THRESHOLD
+    # DEFAULT_SEARCH_THRESHOLD is defined at module scope with a runtime-safe default
     src = SdrplayAudioSource(freq_khz=freq_khz, audio_rate=rate, sdr_rate=sdr_rate, device_args=device_args, gain_db=gain_db)
     src.start()
     try:
@@ -582,7 +590,6 @@ def main():
     ap = argparse.ArgumentParser(description="FT8 live monitor (KiwiSDR or SDRplay)")
     src_grp = ap.add_argument_group("source selection")
     src_grp.add_argument("--source", choices=["kiwi", "sdrplay"], default="kiwi", help="audio source")
-    src_grp.add_argument("--wav", type=str, default="", help="offline mode: path to 12 kHz mono WAV to process")
     kiwi = ap.add_argument_group("kiwi options")
     kiwi.add_argument("--host", default="192.168.2.10")
     kiwi.add_argument("--port", type=int, default=8073)
@@ -595,14 +602,15 @@ def main():
     sdr.add_argument("--gain-db", type=float, default=None, help="Optional RF gain in dB")
     ap.add_argument("--freq-khz", type=float, default=14074.0, help="dial frequency in kHz (USB)")
     ap.add_argument("--rate", type=int, default=12000)
+    ap.add_argument("--wav", type=str, default="", help="offline: path to 12 kHz mono WAV to process")
     ap.add_argument("--no-ui", action="store_true", help="disable curses UI; print plain lines")
-    ap.add_argument("--oneshot", action="store_true", help="capture one 15s window, decode, exit")
+    ap.add_argument("--oneshot", action="store_true", help="capture one 15 s window, decode, exit")
     args = ap.parse_args()
 
     if args.wav:
         # Offline test mode: process a single 15 s window from a WAV
         from utils import read_wav
-        from tests.utils import DEFAULT_SEARCH_THRESHOLD
+        # DEFAULT_SEARCH_THRESHOLD is defined at module scope with a runtime-safe default
 
         audio = read_wav(args.wav)
         sym_len = int(audio.sample_rate_in_hz / TONE_SPACING_IN_HZ)
