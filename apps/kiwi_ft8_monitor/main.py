@@ -29,7 +29,8 @@ try:  # pragma: no cover - optional import for dev environment
     DEFAULT_SEARCH_THRESHOLD = _DEFAULT_SEARCH_THRESHOLD
 except Exception:  # pragma: no cover - production/runtime fallback
     DEFAULT_SEARCH_THRESHOLD = 1.0
-from demod import decode_full_period, TONE_SPACING_IN_HZ
+from demod import decode_full_period, TONE_SPACING_IN_HZ, fine_sync_candidate
+from utils import FT8_SYMBOL_LENGTH_IN_SEC, FT8_SYMBOLS_PER_MESSAGE, COSTAS_SEQUENCE, COSTAS_START_OFFSET_SEC
 
 
 @dataclass
@@ -471,7 +472,12 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
             stdscr.addstr(row, 0, f"{hdr_l} | {hdr_r}"[:w-1]); row += 1
         col_w = max(10, (w - 3) // 2)
         for left_rec, right_rec in pairs:
-            left = _fmt_line(left_rec) if left_rec is not None else ""
+            if left_rec is not None:
+                left = _fmt_line(left_rec)
+            else:
+                # If jt9-only, show our probe metrics for that jt9 decode if available
+                probe = right_rec.get('ft8r_probe') if (right_rec and isinstance(right_rec, dict)) else None
+                left = (probe or "")
             right = _fmt_line(right_rec) if right_rec is not None else ""
             if row < h-1:
                 stdscr.addstr(row, 0, f"{left[:col_w].ljust(col_w)} | {right[:col_w].ljust(col_w)}"[:w-1])
@@ -519,6 +525,14 @@ def run_monitor_source(src_factory):
                     cmp_status = None
                     if getattr(run_monitor_source, "_compare_wsjt", False):
                         jt9_decs = decode_with_jt9(audio)
+                        # Attach ft8r probe metrics to each jt9 decode for UI gaps
+                        for r in jt9_decs:
+                            try:
+                                probe = _ft8r_costas_probe(audio, float(r.get('dt', 0.0)), float(r.get('freq', 0.0)))
+                            except Exception:
+                                probe = None
+                            if probe:
+                                r['ft8r_probe'] = probe
                         ours_msgs = {d.get('message', '') for d in decs}
                         jt9_msgs = {d.get('message', '') for d in jt9_decs}
                         both = ours_msgs & jt9_msgs
@@ -862,6 +876,13 @@ def main():
                 cmp_status = None
                 if args.compare_wsjtx:
                     jt9_decs = decode_with_jt9(audio)
+                    for r in jt9_decs:
+                        try:
+                            probe = _ft8r_costas_probe(audio, float(r.get('dt', 0.0)), float(r.get('freq', 0.0)))
+                        except Exception:
+                            probe = None
+                        if probe:
+                            r['ft8r_probe'] = probe
                     ours_msgs = {r['message'] for r in decs}
                     jt9_msgs = {r['message'] for r in jt9_decs}
                     both = ours_msgs & jt9_msgs
@@ -1034,5 +1055,40 @@ def decode_with_jt9(audio: RealSamples) -> list[dict]:
             os.remove(wav_path)
         except Exception:
             pass
+
+
+def _ft8r_costas_probe(audio: RealSamples, dt: float, freq: float) -> str | None:
+    """Return a compact probe string for Costas sync at (dt,freq).
+
+    Computes the Costas energy sum and the number of symbols (out of 21) where
+    the expected Costas tone is the strongest among the 8 tones.
+    """
+    try:
+        bb, dt_ref, freq_ref = fine_sync_candidate(audio, freq, dt)
+        sr = bb.sample_rate_in_hz
+        sym_len = int(round(sr * FT8_SYMBOL_LENGTH_IN_SEC))
+        seg = bb.samples[: sym_len * FT8_SYMBOLS_PER_MESSAGE].reshape(FT8_SYMBOLS_PER_MESSAGE, sym_len)
+        # Tone response magnitudes squared for each symbol
+        time_idx = np.arange(sym_len) / sr
+        bases = np.exp(-2j * np.pi * (np.arange(8)[:, None] * TONE_SPACING_IN_HZ) * time_idx[None, :])
+        resp = np.abs(bases @ seg.T) ** 2  # (8, 79)
+        # Costas positions and tones
+        costas_pos = list(range(7)) + list(range(36, 43)) + list(range(72, 79))
+        tones = COSTAS_SEQUENCE * 3
+        # Energy sum over Costas placements
+        energy = float(resp[tones, costas_pos].sum())
+        # Gate matches: expected tone equals argmax at each Costas symbol
+        max_idx = np.argmax(resp[:, costas_pos], axis=0)
+        matches = int((max_idx == np.array(tones)).sum())
+        # Compact formatting for energy
+        if energy >= 1e6:
+            e_str = f"{energy/1e6:.1f}M"
+        elif energy >= 1e3:
+            e_str = f"{energy/1e3:.1f}k"
+        else:
+            e_str = f"{energy:.0f}"
+        return f"E={e_str} G={matches}/21"
+    except Exception:
+        return None
 if __name__ == "__main__":
     main()
