@@ -472,15 +472,47 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
             stdscr.addstr(row, 0, f"{hdr_l} | {hdr_r}"[:w-1]); row += 1
         col_w = max(10, (w - 3) // 2)
         for left_rec, right_rec in pairs:
+            # Build left and right strings
+            left_attr = 0
             if left_rec is not None:
                 left = _fmt_line(left_rec)
             else:
-                # If jt9-only, show our probe metrics for that jt9 decode if available
+                # If jt9-only, show our probe metrics and search score if available
                 probe = right_rec.get('ft8r_probe') if (right_rec and isinstance(right_rec, dict)) else None
-                left = (probe or "")
+                s_val = right_rec.get('ft8r_search_score') if (right_rec and isinstance(right_rec, dict)) else None
+                s_thr = right_rec.get('ft8r_search_thr') if (right_rec and isinstance(right_rec, dict)) else None
+                s_fail = right_rec.get('ft8r_search_fail') if (right_rec and isinstance(right_rec, dict)) else None
+                parts = []
+                if probe:
+                    parts.append(str(probe))
+                if s_val is not None:
+                    try:
+                        sval = float(s_val); 
+                        if s_thr is not None and float(sval) < float(s_thr):
+                            parts.append(f"S={sval:.2f}<thr")
+                            try:
+                                left_attr = curses.color_pair(1)
+                            except Exception:
+                                left_attr = 0
+                        else:
+                            parts.append(f"S={sval:.2f}")
+                    except Exception:
+                        pass
+                left = " ".join(parts)
             right = _fmt_line(right_rec) if right_rec is not None else ""
             if row < h-1:
-                stdscr.addstr(row, 0, f"{left[:col_w].ljust(col_w)} | {right[:col_w].ljust(col_w)}"[:w-1])
+                # Print left with potential color, then separator and right
+                left_print = left[:col_w].ljust(col_w)
+                try:
+                    if left_attr:
+                        stdscr.addstr(row, 0, left_print, left_attr)
+                    else:
+                        stdscr.addstr(row, 0, left_print)
+                except Exception:
+                    stdscr.addstr(row, 0, left_print)
+                sep = " | "
+                stdscr.addstr(row, len(left_print), sep)
+                stdscr.addstr(row, len(left_print) + len(sep), right[:col_w].ljust(col_w)[: w - (len(left_print)+len(sep)) - 1])
                 row += 1
             else:
                 break
@@ -507,6 +539,10 @@ def run_monitor_source(src_factory):
         def _main(stdscr):
             curses.curs_set(0)
             stdscr.nodelay(True)
+            try:
+                curses.start_color(); curses.use_default_colors(); curses.init_pair(1, curses.COLOR_RED, -1)
+            except Exception:
+                pass
             last_decodes: List[dict] = []
             last_metrics = Metrics()
             nb = next_strict_boundary_utc(time.time())
@@ -519,13 +555,18 @@ def run_monitor_source(src_factory):
                     max_dt_samples = len(audio.samples) - int(audio.sample_rate_in_hz * 0.5)
                     max_dt_symbols = -(-max_dt_samples // sym_len)
                     cand_count = len(find_candidates(audio, max_freq_bin, max_dt_symbols, threshold=DEFAULT_SEARCH_THRESHOLD))
+                    # Precompute search score map for debug annotations
+                    try:
+                        scores_map, dts_arr, freqs_arr = candidate_score_map(audio, max_freq_bin, max_dt_symbols)
+                    except Exception:
+                        scores_map = None; dts_arr = None; freqs_arr = None
                     t0 = time.perf_counter()
                     decs = decode_full_period(audio, threshold=DEFAULT_SEARCH_THRESHOLD)
                     # Optional WSJT-X comparison
                     cmp_status = None
                     if getattr(run_monitor_source, "_compare_wsjt", False):
                         jt9_decs = decode_with_jt9(audio)
-                        # Attach ft8r probe metrics to each jt9 decode for UI gaps
+                        # Attach ft8r probe and search-map score to each jt9 decode for UI gaps
                         for r in jt9_decs:
                             try:
                                 probe = _ft8r_costas_probe(audio, float(r.get('dt', 0.0)), float(r.get('freq', 0.0)))
@@ -533,6 +574,19 @@ def run_monitor_source(src_factory):
                                 probe = None
                             if probe:
                                 r['ft8r_probe'] = probe
+                            if scores_map is not None and dts_arr is not None and freqs_arr is not None:
+                                try:
+                                    import numpy as _np
+                                    dtj = float(r.get('dt', 0.0)); fqj = float(r.get('freq', 0.0))
+                                    i = int(_np.argmin(_np.abs(dts_arr - dtj)))
+                                    j = int(_np.argmin(_np.abs(freqs_arr - fqj)))
+                                    if abs(float(dts_arr[i]) - dtj) <= 0.10 and abs(float(freqs_arr[j]) - fqj) <= max(2.0, TONE_SPACING_IN_HZ):
+                                        sval = float(scores_map[i, j])
+                                        r['ft8r_search_score'] = sval
+                                        r['ft8r_search_thr'] = float(DEFAULT_SEARCH_THRESHOLD)
+                                        r['ft8r_search_fail'] = bool(sval < float(DEFAULT_SEARCH_THRESHOLD))
+                                except Exception:
+                                    pass
                         ours_msgs = {d.get('message', '') for d in decs}
                         jt9_msgs = {d.get('message', '') for d in jt9_decs}
                         both = ours_msgs & jt9_msgs
