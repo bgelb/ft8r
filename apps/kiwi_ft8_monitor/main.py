@@ -294,7 +294,8 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
     # Clock and progress bar
     utc_str = time.strftime('%H:%M:%S', time.gmtime(now_ts))
     if next_boundary is None:
-        next_boundary = next_boundary_utc(now_ts)
+        # Use strict boundary for progress calculation to avoid freezing at :00
+        next_boundary = next_strict_boundary_utc(now_ts)
     start = next_boundary - 15
     elapsed = max(0.0, min(15.0, now_ts - start))
     ratio = elapsed / 15.0 if 15.0 > 0 else 0.0
@@ -331,7 +332,7 @@ def run_monitor_source(src_factory):
             stdscr.nodelay(True)
             last_decodes: List[dict] = []
             last_metrics = Metrics()
-            nb = next_boundary_utc(time.time())
+            nb = next_strict_boundary_utc(time.time())
             while True:
                 now = time.time()
                 if now >= nb:
@@ -354,8 +355,8 @@ def run_monitor_source(src_factory):
                         num_decodes=len(decs),
                         decode_time_s=(t1 - t0),
                     )
-                    # schedule next boundary
-                    nb = next_boundary_utc(now + 0.1)
+                    # Schedule strictly after 'now' to avoid re-triggering same boundary
+                    nb = next_strict_boundary_utc(now)
                 # Always render clock/progress with last results
                 render(stdscr, last_decodes, last_metrics, now_ts=now, next_boundary=nb)
                 # Handle key
@@ -415,7 +416,7 @@ def run_monitor_recorder(host: str, port: int, freq_khz: float, mode: str, rate:
         last_decodes: List[dict] = []
         last_metrics = Metrics()
         try:
-            nb = next_boundary_utc(time.time())
+            nb = next_strict_boundary_utc(time.time())
             while True:
                 wavs = sorted([str(Path(tdir)/p) for p in os.listdir(tdir) if p.lower().endswith('.wav')])
                 # Decode any new completed file(s) except the newest (being written)
@@ -433,7 +434,7 @@ def run_monitor_recorder(host: str, port: int, freq_khz: float, mode: str, rate:
                     decs = sorted(decs, key=lambda d: d.get('freq', 0.0))
                     t1 = time.perf_counter()
                     # Approximate window bounds from current UTC boundary
-                    now = time.time(); nb = next_boundary_utc(now)
+                    now = time.time(); nb = next_strict_boundary_utc(now)
                     last_decodes[:] = decs
                     last_metrics.dt_utc = nb
                     last_metrics.window_start = nb-15
@@ -443,7 +444,7 @@ def run_monitor_recorder(host: str, port: int, freq_khz: float, mode: str, rate:
                     last_metrics.decode_time_s = (t1 - t0)
                     processed.add(wav_path)
                 # periodic render with ticking clock/progress
-                now2 = time.time(); nb2 = next_boundary_utc(now2)
+                now2 = time.time(); nb2 = next_strict_boundary_utc(now2)
                 render(stdscr, last_decodes, last_metrics, now_ts=now2, next_boundary=nb2)
                 # handle key
                 try:
