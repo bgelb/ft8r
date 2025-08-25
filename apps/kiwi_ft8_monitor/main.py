@@ -29,8 +29,22 @@ try:  # pragma: no cover - optional import for dev environment
     DEFAULT_SEARCH_THRESHOLD = _DEFAULT_SEARCH_THRESHOLD
 except Exception:  # pragma: no cover - production/runtime fallback
     DEFAULT_SEARCH_THRESHOLD = 1.0
-from demod import decode_full_period, TONE_SPACING_IN_HZ, fine_sync_candidate, soft_demod
-from utils import FT8_SYMBOL_LENGTH_IN_SEC, FT8_SYMBOLS_PER_MESSAGE, COSTAS_SEQUENCE, COSTAS_START_OFFSET_SEC
+from demod import (
+    decode_full_period,
+    TONE_SPACING_IN_HZ,
+    fine_sync_candidate,
+    soft_demod,
+    naive_hard_decode,
+    ldpc_decode,
+)
+from utils import (
+    FT8_SYMBOL_LENGTH_IN_SEC,
+    FT8_SYMBOLS_PER_MESSAGE,
+    COSTAS_SEQUENCE,
+    COSTAS_START_OFFSET_SEC,
+    check_crc,
+    decode77,
+)
 
 
 @dataclass
@@ -520,7 +534,7 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
                 diag = {
                     'dt': right_rec.get('ft8r_cand_dt') if (right_rec and right_rec.get('ft8r_cand_dt') is not None) else (right_rec.get('dt') if right_rec else 0.0),
                     'freq': right_rec.get('ft8r_cand_freq') if (right_rec and right_rec.get('ft8r_cand_freq') is not None) else (right_rec.get('freq') if right_rec else 0.0),
-                    'message': '',
+                    'message': (f"seed: {right_rec.get('ft8r_seed_msg')}" if (right_rec and right_rec.get('ft8r_seed_msg')) else ''),
                     'ft8r_probe': right_rec.get('ft8r_probe') if right_rec else None,
                     'ft8r_search_score': right_rec.get('ft8r_search_score') if right_rec else None,
                     'ft8r_search_thr': right_rec.get('ft8r_search_thr') if right_rec else None,
@@ -685,6 +699,15 @@ def run_monitor_source(src_factory):
                                     r['ft8r_cand_dt'] = cand_dt; r['ft8r_cand_freq'] = cand_fq
                                 except Exception:
                                     pass
+                            # Seeded decode attempt using JT9 dt/freq regardless of candidate matching
+                            try:
+                                ok, msg, dt_seed, fq_seed = _ft8r_seeded_decode(audio, float(r.get('dt', 0.0)), float(r.get('freq', 0.0)))
+                                if ok:
+                                    r['ft8r_seed_msg'] = msg
+                                    r['ft8r_seed_dt'] = dt_seed
+                                    r['ft8r_seed_freq'] = fq_seed
+                            except Exception:
+                                pass
                         ours_msgs = {d.get('message', '') for d in decs}
                         jt9_msgs = {d.get('message', '') for d in jt9_decs}
                         both = ours_msgs & jt9_msgs
@@ -1262,5 +1285,24 @@ def _ft8r_compute_llr_avg(audio: RealSamples, dt: float, freq: float) -> float |
         return float(_np.mean(_np.abs(llrs)))
     except Exception:
         return None
+
+
+def _ft8r_seeded_decode(audio: RealSamples, dt: float, freq: float) -> tuple[bool, str | None, float | None, float | None]:
+    """Attempt a full decode seeded by (dt,freq), bypassing candidate search.
+
+    Returns (ok, message, dt_refined, freq_refined). ok=True only if CRC passes.
+    """
+    try:
+        bb, dt_f, freq_f = fine_sync_candidate(audio, freq, dt)
+        llrs = soft_demod(bb)
+        bits_h = naive_hard_decode(llrs)
+        if check_crc(bits_h):
+            return True, decode77(bits_h[:77]), dt_f, freq_f
+        bits = ldpc_decode(llrs)
+        if check_crc(bits):
+            return True, decode77(bits[:77]), dt_f, freq_f
+    except Exception:
+        pass
+    return False, None, None, None
 if __name__ == "__main__":
     main()
