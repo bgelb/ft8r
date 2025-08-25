@@ -443,28 +443,40 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
     if cmp_status is not None:
         jt9_list = cmp_status.get('jt9_decs')
     if jt9_list:
-        # Build message maps and ordered keys
-        ours_msgs = [d.get('message', '') for d in decodes]
-        jt9_msgs = [d.get('message', '') for d in jt9_list]
-        # Preserve order: first ours, then jt9-only
-        seen = set()
-        keys: list[str] = []
-        for m in ours_msgs + jt9_msgs:
-            if m and m not in seen:
-                seen.add(m); keys.append(m)
-        ours_map = {d.get('message', ''): d for d in decodes}
-        jt9_map = {d.get('message', ''): d for d in jt9_list}
+        # Align two decode lists by increasing frequency with a small tolerance,
+        # inserting gaps where only one side has a decode.
+        ours_sorted = sorted(decodes, key=lambda r: float(r.get('freq', 0.0)))
+        jt9_sorted = sorted(jt9_list, key=lambda r: float(r.get('freq', 0.0)))
+        i = j = 0
+        pairs: list[tuple[dict | None, dict | None]] = []
+        df_eps = max(2.0, TONE_SPACING_IN_HZ)  # Hz tolerance for pairing
+        while i < len(ours_sorted) and j < len(jt9_sorted):
+            fi = float(ours_sorted[i].get('freq', 0.0))
+            fj = float(jt9_sorted[j].get('freq', 0.0))
+            if abs(fi - fj) <= df_eps:
+                pairs.append((ours_sorted[i], jt9_sorted[j]))
+                i += 1; j += 1
+            elif fi < fj - df_eps:
+                pairs.append((ours_sorted[i], None))
+                i += 1
+            else:
+                pairs.append((None, jt9_sorted[j]))
+                j += 1
+        while i < len(ours_sorted):
+            pairs.append((ours_sorted[i], None)); i += 1
+        while j < len(jt9_sorted):
+            pairs.append((None, jt9_sorted[j])); j += 1
         # Two-column header
         if row < h-1:
             col_w = max(10, (w - 3) // 2)
             hdr_l = "ft8r".ljust(col_w)
             hdr_r = "jt9".ljust(col_w)
             stdscr.addstr(row, 0, f"{hdr_l} | {hdr_r}"[:w-1]); row += 1
-        for key in keys:
-            left = _fmt_line(ours_map[key]) if key in ours_map else ""
-            right = _fmt_line(jt9_map[key]) if key in jt9_map else ""
+        col_w = max(10, (w - 3) // 2)
+        for left_rec, right_rec in pairs:
+            left = _fmt_line(left_rec) if left_rec is not None else ""
+            right = _fmt_line(right_rec) if right_rec is not None else ""
             if row < h-1:
-                col_w = max(10, (w - 3) // 2)
                 stdscr.addstr(row, 0, f"{left[:col_w].ljust(col_w)} | {right[:col_w].ljust(col_w)}"[:w-1])
                 row += 1
             else:
