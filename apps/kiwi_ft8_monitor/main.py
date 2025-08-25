@@ -426,17 +426,58 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
         if ex_j:
             stdscr.addstr(row_sep, 0, f"jt9-only: {ex_j[0][:w-11]}"[:w-1]); row_sep += 1
     stdscr.hline(row_sep, 0, ord('-'), w)
-    # Decodes list (sorted externally); include SNR column when available/approx)
+    # Decodes list (sorted externally). If comparison is active and jt9 results
+    # are present, render two columns side-by-side aligned by message text.
     row = row_sep + 1
-    for d in decodes:
-        snr = _snr_db_from_rec(d)
+    def _fmt_line(rec: dict) -> str:
+        snr = _snr_db_from_rec(rec)
         snr_str = f"{snr:+4.0f}dB" if (snr is not None and math.isfinite(snr)) else "   --"
-        line = f"{d['dt']:+5.2f}s  {d['freq']:7.1f} Hz  {snr_str:>6}  {d['message']}"
+        try:
+            dt = float(rec.get('dt', 0.0)); fq = float(rec.get('freq', 0.0))
+        except Exception:
+            dt, fq = 0.0, 0.0
+        msg = rec.get('message', '')
+        return f"{dt:+5.2f}s {fq:7.1f}Hz {snr_str:>6} {msg}"
+
+    jt9_list = None
+    if cmp_status is not None:
+        jt9_list = cmp_status.get('jt9_decs')
+    if jt9_list:
+        # Build message maps and ordered keys
+        ours_msgs = [d.get('message', '') for d in decodes]
+        jt9_msgs = [d.get('message', '') for d in jt9_list]
+        # Preserve order: first ours, then jt9-only
+        seen = set()
+        keys: list[str] = []
+        for m in ours_msgs + jt9_msgs:
+            if m and m not in seen:
+                seen.add(m); keys.append(m)
+        ours_map = {d.get('message', ''): d for d in decodes}
+        jt9_map = {d.get('message', ''): d for d in jt9_list}
+        # Two-column header
         if row < h-1:
-            stdscr.addstr(row, 0, line[:w-1])
-            row += 1
-        else:
-            break
+            col_w = max(10, (w - 3) // 2)
+            hdr_l = "ft8r".ljust(col_w)
+            hdr_r = "jt9".ljust(col_w)
+            stdscr.addstr(row, 0, f"{hdr_l} | {hdr_r}"[:w-1]); row += 1
+        for key in keys:
+            left = _fmt_line(ours_map[key]) if key in ours_map else ""
+            right = _fmt_line(jt9_map[key]) if key in jt9_map else ""
+            if row < h-1:
+                col_w = max(10, (w - 3) // 2)
+                stdscr.addstr(row, 0, f"{left[:col_w].ljust(col_w)} | {right[:col_w].ljust(col_w)}"[:w-1])
+                row += 1
+            else:
+                break
+    else:
+        # Single-column mode
+        for d in decodes:
+            line = _fmt_line(d)
+            if row < h-1:
+                stdscr.addstr(row, 0, line[:w-1])
+                row += 1
+            else:
+                break
     stdscr.addstr(h-1, 0, "Press q to quit")
     stdscr.refresh()
 
@@ -482,6 +523,7 @@ def run_monitor_source(src_factory):
                             'jt9_only': len(jonly),
                             'examples_ours_only': oonly[:1],
                             'examples_jt9_only': jonly[:1],
+                            'jt9_decs': jt9_decs,
                         }
                     else:
                         cmp_status = None
@@ -510,7 +552,15 @@ def run_monitor_source(src_factory):
                     run_monitor_source._last_cmp_status = None  # type: ignore[attr-defined]
                 if 'cmp_status' in locals() and cmp_status is not None:
                     run_monitor_source._last_cmp_status = cmp_status  # type: ignore[attr-defined]
-                render(stdscr, last_decodes, last_metrics, now_ts=now, next_boundary=nb, rx_status=rx_status, cmp_status=run_monitor_source._last_cmp_status)  # type: ignore[attr-defined]
+                render(
+                    stdscr,
+                    last_decodes,
+                    last_metrics,
+                    now_ts=now,
+                    next_boundary=nb,
+                    rx_status=rx_status,
+                    cmp_status=run_monitor_source._last_cmp_status,  # type: ignore[attr-defined]
+                )
                 # Handle key
                 try:
                     ch = stdscr.getch()
@@ -790,7 +840,7 @@ def main():
                 snr = _snr_db_from_rec(d)
                 snr_str = f"{snr:+4.0f}dB" if (snr is not None and math.isfinite(snr)) else "   --"
                 print(f"{d['dt']:+5.2f}s {d['freq']:7.1f}Hz {snr_str:>6} {d['message']}")
-            if args.compare_wsjt:
+            if args.compare_wsjtx:
                 jt9_decs = decode_with_jt9(audio)
                 ours_msgs = {r['message'] for r in decs}
                 jt9_msgs = {r['message'] for r in jt9_decs}
@@ -801,7 +851,7 @@ def main():
                 curses.curs_set(0)
                 metrics = Metrics(window_start=0, window_end=15, num_candidates=len(cands), num_decodes=len(decs), decode_time_s=(t1-t0))
                 cmp_status = None
-                if args.compare_wsjt:
+                if args.compare_wsjtx:
                     jt9_decs = decode_with_jt9(audio)
                     ours_msgs = {r['message'] for r in decs}
                     jt9_msgs = {r['message'] for r in jt9_decs}
@@ -811,6 +861,7 @@ def main():
                         'ours_only': len(ours_msgs-both), 'jt9_only': len(jt9_msgs-both),
                         'examples_ours_only': list(sorted(ours_msgs - both))[:1],
                         'examples_jt9_only': list(sorted(jt9_msgs - both))[:1],
+                        'jt9_decs': jt9_decs,
                     }
                     cmp_status = cmp_status_local
                 render(stdscr, decs, metrics, cmp_status=cmp_status)
@@ -876,14 +927,14 @@ def main():
                 sys.exit(2)
             dargs = dict(devs[args.device_index])
         # Install comparison flag into monitor function state for UI
-        run_monitor_source._compare_wsjt = bool(args.compare_wsjt)  # type: ignore[attr-defined]
+        run_monitor_source._compare_wsjt = bool(args.compare_wsjtx)  # type: ignore[attr-defined]
         return run_monitor_source(lambda: SdrplayAudioSource(args.freq_khz, audio_rate=args.rate, sdr_rate=args.sdr_rate, device_args=dargs, gain_db=args.gain_db))
     # Else kiwi source
     if KiwiSDRStream is not None:
-        run_monitor_source._compare_wsjt = bool(args.compare_wsjt)  # type: ignore[attr-defined]
+        run_monitor_source._compare_wsjt = bool(args.compare_wsjtx)  # type: ignore[attr-defined]
         run_monitor(args.host, args.port, args.freq_khz, args.mode, args.rate)
     else:
-        run_monitor_source._compare_wsjt = bool(args.compare_wsjt)  # type: ignore[attr-defined]
+        run_monitor_source._compare_wsjt = bool(args.compare_wsjtx)  # type: ignore[attr-defined]
         run_monitor_recorder(args.host, args.port, args.freq_khz, args.mode, args.rate)
 def _resolve_wsjt_binary(name: str) -> str | None:
     """Resolve WSJT-X CLI tool path (e.g., 'jt9', 'ft8code').
