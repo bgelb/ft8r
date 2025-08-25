@@ -36,6 +36,9 @@ from demod import (
     soft_demod,
     naive_hard_decode,
     ldpc_decode,
+    downsample_to_baseband,
+    fine_time_sync,
+    fine_freq_sync,
 )
 from utils import (
     FT8_SYMBOL_LENGTH_IN_SEC,
@@ -1324,7 +1327,17 @@ def _ft8r_seeded_decode(audio: RealSamples, dt: float, freq: float) -> tuple[boo
     Returns (ok, message, dt_refined, freq_refined). ok=True only if CRC passes.
     """
     try:
-        bb, dt_f, freq_f = fine_sync_candidate(audio, freq, dt)
+        # Start with a wider time search around JT9 dt to account for small
+        # pipeline differences. Then refine frequency and rebuild BB.
+        bb0 = downsample_to_baseband(audio, freq)
+        sr = bb0.sample_rate_in_hz
+        wide = max(20, int(0.1 * sr))  # ~0.1 s window at baseband rate
+        dt1 = fine_time_sync(bb0, dt, wide)
+        df1 = fine_freq_sync(bb0, dt1, 5.0, 0.25)
+        freq1 = freq + df1
+        bb1 = downsample_to_baseband(audio, freq1)
+        dt2 = fine_time_sync(bb1, dt1, 4)
+        bb, dt_f, freq_f = bb1, dt2, freq1
         llrs = soft_demod(bb)
         bits_h = naive_hard_decode(llrs)
         if check_crc(bits_h):
