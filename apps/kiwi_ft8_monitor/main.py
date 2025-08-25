@@ -703,9 +703,9 @@ def run_monitor_source(src_factory):
                                         # Also find the nearest by normalized distance
                                         def _dist(p):
                                             return ((abs(p[1]-dtj)/dt_eps)**2 + (abs(p[2]-fqj)/fq_eps)**2)
-                                        nb = min(near, key=_dist)
-                                        near_best_by_dist = nb
-                                        near_best_score = float(nb[0])
+                                        nearest_peak = min(near, key=_dist)
+                                        near_best_by_dist = nearest_peak
+                                        near_best_score = float(nearest_peak[0])
                             except Exception:
                                 pass
                             if cand_score is not None:
