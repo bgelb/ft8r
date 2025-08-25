@@ -20,7 +20,15 @@ except Exception:  # pragma: no cover - best effort import
 
 from utils import RealSamples
 from search import find_candidates
-from tests.utils import DEFAULT_SEARCH_THRESHOLD
+"""Runtime configuration values with safe defaults."""
+# Threshold used during candidate search/decoding. Try to import from tests when
+# running inside the repo (developer environment), but default to a safe value
+# when running the app standalone so it does not depend on test modules.
+try:  # pragma: no cover - optional import for dev environment
+    from tests.utils import DEFAULT_SEARCH_THRESHOLD as _DEFAULT_SEARCH_THRESHOLD  # type: ignore
+    DEFAULT_SEARCH_THRESHOLD = _DEFAULT_SEARCH_THRESHOLD
+except Exception:  # pragma: no cover - production/runtime fallback
+    DEFAULT_SEARCH_THRESHOLD = 1.0
 from demod import decode_full_period, TONE_SPACING_IN_HZ
 
 
@@ -61,7 +69,10 @@ class KiwiAudioSource:
                 if self._stop.is_set():
                     break
                 # Normalize chunk to python floats
-                self.buffer.extend(float(x) for x in chunk)
+                try:
+                    self.buffer.extend(chunk.astype(float, copy=False).tolist())
+                except Exception:
+                    self.buffer.extend(float(x) for x in chunk)
 
         self._thr = threading.Thread(target=_reader, daemon=True)
         self._thr.start()
@@ -74,11 +85,172 @@ class KiwiAudioSource:
             pass
         if self._thr is not None:
             self._thr.join(timeout=1.0)
+            self._thr = None
 
     def snapshot_last_15s(self) -> RealSamples:
         # Copy buffer atomically
         arr = np.fromiter(self.buffer, dtype=float)
         return RealSamples(arr, sample_rate_in_hz=self.rate)
+
+
+class SdrplayAudioSource:
+    """Stream complex IQ from an SDRplay (via SoapySDR), produce 12 kHz real audio.
+
+    Implementation notes:
+    - Tunes to the provided dial frequency (USB). We low-pass around DC to ~4 kHz,
+      decimate to 12 kHz, and take the real part to obtain a mono audio stream.
+    - This is a pragmatic USB demodulation approach adequate for FT8 monitoring
+      on the standard sub-band with minimal adjacent-LSB content.
+    - Requires SoapySDR Python bindings and SDRplay driver installed on the system.
+    """
+
+    def __init__(self, freq_khz: float, audio_rate: int = 12000, sdr_rate: int = 192000,
+                 device_args: dict | None = None, gain_db: float | None = None):
+        self.freq_hz = int(freq_khz * 1000)
+        self.audio_rate = audio_rate
+        self.sdr_rate = sdr_rate
+        self.decim = int(round(self.sdr_rate / self.audio_rate))
+        if self.sdr_rate % self.audio_rate != 0:
+            raise ValueError("sdr_rate must be an integer multiple of audio_rate")
+        self.device_args = device_args or {"driver": "sdrplay"}
+        self.gain_db = gain_db
+
+        # Lazy imports to avoid hard dependency when not used
+        try:
+            import SoapySDR  # type: ignore
+            from SoapySDR import SOAPY_SDR_RX  # type: ignore
+        except Exception:
+            # Try common system site directories when running inside a venv
+            import sys as _sys
+            import os as _os
+            for p in ["/usr/lib/python3/dist-packages", "/usr/local/lib/python3/dist-packages"]:
+                if _os.path.isdir(p) and p not in _sys.path:
+                    _sys.path.append(p)
+            try:
+                import SoapySDR  # type: ignore
+                from SoapySDR import SOAPY_SDR_RX  # type: ignore
+            except Exception as e:  # pragma: no cover
+                print("ERROR: SoapySDR Python bindings not available:", e, file=sys.stderr)
+                sys.exit(2)
+        self._SoapySDR = SoapySDR
+        self._SOAPY_SDR_RX = SOAPY_SDR_RX
+
+        # DSP helpers
+        from scipy.signal import resample_poly  # type: ignore
+        self._resample_poly = resample_poly
+
+        # Stream state
+        self._stop = threading.Event()
+        self._thr: threading.Thread | None = None
+        self.buffer: Deque[float] = collections.deque(maxlen=audio_rate * 15)
+        self._init_device()
+
+    @staticmethod
+    def enumerate_devices() -> list[dict]:
+        try:
+            import SoapySDR  # type: ignore
+        except Exception:
+            # Try common system site directories when running inside a venv
+            import sys as _sys, os as _os
+            for p in ["/usr/lib/python3/dist-packages", "/usr/local/lib/python3/dist-packages"]:
+                if _os.path.isdir(p) and p not in _sys.path:
+                    _sys.path.append(p)
+            try:
+                import SoapySDR  # type: ignore
+            except Exception:
+                return []
+        devs: list[dict] = []
+        for drv in ("sdrplay", "sdrplay3"):
+            try:
+                devs.extend(list(SoapySDR.Device.enumerate({"driver": drv})))  # type: ignore
+            except Exception:
+                pass
+        if not devs:
+            try:
+                devs = list(SoapySDR.Device.enumerate())  # type: ignore
+            except Exception:
+                pass
+        return devs
+
+    def _init_device(self):
+        SoapySDR = self._SoapySDR
+        SOAPY_SDR_RX = self._SOAPY_SDR_RX
+        # Open device
+        try:
+            self.dev = SoapySDR.Device(self.device_args)  # type: ignore
+        except Exception as e:
+            print(f"ERROR: Failed to open SDRplay via SoapySDR with args {self.device_args}: {e}", file=sys.stderr)
+            sys.exit(2)
+        # Configure stream
+        self.dev.setSampleRate(SOAPY_SDR_RX, 0, self.sdr_rate)
+        try:
+            self.dev.setBandwidth(SOAPY_SDR_RX, 0, min(6000000, max(200000, self.sdr_rate)))
+        except Exception:
+            pass
+        self.dev.setFrequency(SOAPY_SDR_RX, 0, self.freq_hz)
+        if self.gain_db is not None:
+            try:
+                self.dev.setGain(SOAPY_SDR_RX, 0, float(self.gain_db))
+            except Exception:
+                pass
+        # Setup RX stream (complex float32)
+        self.stream = self.dev.setupStream(SOAPY_SDR_RX, self._SoapySDR.SOAPY_SDR_CF32, [0], {})
+
+    def start(self):
+        self.dev.activateStream(self.stream)
+
+        def _reader():
+            import numpy as np
+            dec = self.decim
+            # Use reasonably large read chunk for better FIR efficiency
+            chunk = 49152  # 256 ms at 192 kS/s
+            buf = np.empty(chunk, dtype=np.complex64)
+            while not self._stop.is_set():
+                r = self.dev.readStream(self.stream, [buf], chunk)
+                # r may be a struct-like with attrs (ret, flags, timeNs) or a tuple
+                if hasattr(r, 'ret'):
+                    nread = int(getattr(r, 'ret'))
+                elif isinstance(r, tuple) and len(r) >= 1:
+                    nread = int(r[0]) if r[0] is not None else 0
+                else:
+                    nread = 0
+                if nread < 0:
+                    # transient read error; backoff a bit
+                    time.sleep(0.01)
+                    continue
+                if nread == 0:
+                    continue
+                iq = buf[:nread]
+                # Decimate to audio rate with FIR low-pass (Kaiser window)
+                y = self._resample_poly(iq, up=1, down=dec, window=("kaiser", 8.6))
+                # Real mono audio
+                audio = np.real(y).astype(float)
+                try:
+                    self.buffer.extend(audio.tolist())
+                except Exception:
+                    self.buffer.extend(float(v) for v in audio)
+
+        self._thr = threading.Thread(target=_reader, daemon=True)
+        self._thr.start()
+
+    def stop(self):
+        self._stop.set()
+        try:
+            self.dev.deactivateStream(self.stream)
+        except Exception:
+            pass
+        try:
+            self.dev.closeStream(self.stream)
+        except Exception:
+            pass
+        if self._thr is not None:
+            self._thr.join(timeout=1.0)
+            self._thr = None
+
+    def snapshot_last_15s(self) -> RealSamples:
+        import numpy as np
+        arr = np.fromiter(self.buffer, dtype=float)
+        return RealSamples(arr, sample_rate_in_hz=self.audio_rate)
 
 
 def next_boundary_utc(now: float) -> float:
@@ -122,7 +294,8 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
     # Clock and progress bar
     utc_str = time.strftime('%H:%M:%S', time.gmtime(now_ts))
     if next_boundary is None:
-        next_boundary = next_boundary_utc(now_ts)
+        # Use strict boundary for progress calculation to avoid freezing at :00
+        next_boundary = next_strict_boundary_utc(now_ts)
     start = next_boundary - 15
     elapsed = max(0.0, min(15.0, now_ts - start))
     ratio = elapsed / 15.0 if 15.0 > 0 else 0.0
@@ -147,8 +320,8 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
     stdscr.refresh()
 
 
-def run_monitor(host: str, port: int, freq_khz: float, mode: str, rate: int):
-    src = KiwiAudioSource(host, port, freq_khz, mode, rate)
+def run_monitor_source(src_factory):
+    src = src_factory()
     src.start()
     try:
         time.sleep(1.0)  # fill buffer a bit
@@ -159,7 +332,7 @@ def run_monitor(host: str, port: int, freq_khz: float, mode: str, rate: int):
             stdscr.nodelay(True)
             last_decodes: List[dict] = []
             last_metrics = Metrics()
-            nb = next_boundary_utc(time.time())
+            nb = next_strict_boundary_utc(time.time())
             while True:
                 now = time.time()
                 if now >= nb:
@@ -182,8 +355,8 @@ def run_monitor(host: str, port: int, freq_khz: float, mode: str, rate: int):
                         num_decodes=len(decs),
                         decode_time_s=(t1 - t0),
                     )
-                    # schedule next boundary
-                    nb = next_boundary_utc(now + 0.1)
+                    # Schedule strictly after 'now' to avoid re-triggering same boundary
+                    nb = next_strict_boundary_utc(now)
                 # Always render clock/progress with last results
                 render(stdscr, last_decodes, last_metrics, now_ts=now, next_boundary=nb)
                 # Handle key
@@ -198,6 +371,10 @@ def run_monitor(host: str, port: int, freq_khz: float, mode: str, rate: int):
         curses.wrapper(_main)
     finally:
         src.stop()
+
+
+def run_monitor(host: str, port: int, freq_khz: float, mode: str, rate: int):
+    return run_monitor_source(lambda: KiwiAudioSource(host, port, freq_khz, mode, rate))
 
 def run_monitor_recorder(host: str, port: int, freq_khz: float, mode: str, rate: int):
     """Live monitor using external kiwirecorder.py rotating 15s WAV files.
@@ -239,7 +416,7 @@ def run_monitor_recorder(host: str, port: int, freq_khz: float, mode: str, rate:
         last_decodes: List[dict] = []
         last_metrics = Metrics()
         try:
-            nb = next_boundary_utc(time.time())
+            nb = next_strict_boundary_utc(time.time())
             while True:
                 wavs = sorted([str(Path(tdir)/p) for p in os.listdir(tdir) if p.lower().endswith('.wav')])
                 # Decode any new completed file(s) except the newest (being written)
@@ -257,7 +434,7 @@ def run_monitor_recorder(host: str, port: int, freq_khz: float, mode: str, rate:
                     decs = sorted(decs, key=lambda d: d.get('freq', 0.0))
                     t1 = time.perf_counter()
                     # Approximate window bounds from current UTC boundary
-                    now = time.time(); nb = next_boundary_utc(now)
+                    now = time.time(); nb = next_strict_boundary_utc(now)
                     last_decodes[:] = decs
                     last_metrics.dt_utc = nb
                     last_metrics.window_start = nb-15
@@ -267,7 +444,7 @@ def run_monitor_recorder(host: str, port: int, freq_khz: float, mode: str, rate:
                     last_metrics.decode_time_s = (t1 - t0)
                     processed.add(wav_path)
                 # periodic render with ticking clock/progress
-                now2 = time.time(); nb2 = next_boundary_utc(now2)
+                now2 = time.time(); nb2 = next_strict_boundary_utc(now2)
                 render(stdscr, last_decodes, last_metrics, now_ts=now2, next_boundary=nb2)
                 # handle key
                 try:
@@ -294,7 +471,7 @@ def run_oneshot(host: str, port: int, freq_khz: float, mode: str, rate: int, no_
     If the kiwisdr Python package is unavailable, falls back to using the external
     'kiwirecorder.py' if found on PATH to capture a 15 s WAV.
     """
-    from tests.utils import DEFAULT_SEARCH_THRESHOLD
+    # DEFAULT_SEARCH_THRESHOLD is defined at module scope with a runtime-safe default
     if KiwiSDRStream is None:
         # Fallback: use kiwirecorder.py to capture a single 15 s WAV aligned to boundary
         import shutil, tempfile, subprocess, os
@@ -358,6 +535,41 @@ def run_oneshot(host: str, port: int, freq_khz: float, mode: str, rate: int, no_
         need = rate * 15; t0 = time.time()
         while len(src.buffer) < need:
             time.sleep(0.05)
+            if time.time() - t0 > 60:
+                print("ERROR: timed out waiting for audio buffer to fill", file=sys.stderr)
+                return
+        now = time.time(); nb = next_strict_boundary_utc(now); time.sleep(max(0.0, nb - now))
+        audio = src.snapshot_last_15s()
+        sym_len = int(audio.sample_rate_in_hz / TONE_SPACING_IN_HZ)
+        max_freq_bin = int(3000 / TONE_SPACING_IN_HZ)
+        max_dt_samples = len(audio.samples) - int(audio.sample_rate_in_hz * 0.5)
+        max_dt_symbols = -(-max_dt_samples // sym_len)
+        cands = find_candidates(audio, max_freq_bin, max_dt_symbols, threshold=DEFAULT_SEARCH_THRESHOLD)
+        t1 = time.perf_counter(); decs = decode_full_period(audio, threshold=DEFAULT_SEARCH_THRESHOLD); t2 = time.perf_counter()
+        decs = sorted(decs, key=lambda d: d.get('freq', 0.0))
+        metrics = Metrics(dt_utc=nb, window_start=nb-15, window_end=nb, num_candidates=len(cands), num_decodes=len(decs), decode_time_s=(t2-t1))
+        if no_ui:
+            print(f"candidates={metrics.num_candidates} decodes={metrics.num_decodes} decode_time={metrics.decode_time_s:.2f}s")
+            for d in decs:
+                snr = _snr_db_from_rec(d)
+                snr_str = f"{snr:+4.0f}dB" if (snr is not None and math.isfinite(snr)) else "   --"
+                print(f"{d['dt']:+5.2f}s {d['freq']:7.1f}Hz {snr_str:>6} {d['message']}")
+        else:
+            def _once(stdscr):
+                curses.curs_set(0); render(stdscr, decs, metrics); stdscr.getch()
+            curses.wrapper(_once)
+    finally:
+        src.stop()
+
+
+def run_oneshot_sdrplay(freq_khz: float, rate: int, sdr_rate: int, device_args: dict | None = None, gain_db: float | None = None, no_ui: bool = True):
+    # DEFAULT_SEARCH_THRESHOLD is defined at module scope with a runtime-safe default
+    src = SdrplayAudioSource(freq_khz=freq_khz, audio_rate=rate, sdr_rate=sdr_rate, device_args=device_args, gain_db=gain_db)
+    src.start()
+    try:
+        need = rate * 15; t0 = time.time()
+        while len(src.buffer) < need:
+            time.sleep(0.05)
             if time.time() - t0 > 30: break
         now = time.time(); nb = next_strict_boundary_utc(now); time.sleep(max(0.0, nb - now))
         audio = src.snapshot_last_15s()
@@ -384,21 +596,30 @@ def run_oneshot(host: str, port: int, freq_khz: float, mode: str, rate: int, no_
 
 
 def main():
-    ap = argparse.ArgumentParser(description="KiwiSDR FT8 monitor (console)")
-    ap.add_argument("--host", default="192.168.2.10")
-    ap.add_argument("--port", type=int, default=8073)
+    ap = argparse.ArgumentParser(description="FT8 live monitor (KiwiSDR or SDRplay)")
+    src_grp = ap.add_argument_group("source selection")
+    src_grp.add_argument("--source", choices=["kiwi", "sdrplay"], default="kiwi", help="audio source")
+    kiwi = ap.add_argument_group("kiwi options")
+    kiwi.add_argument("--host", default="192.168.2.10")
+    kiwi.add_argument("--port", type=int, default=8073)
+    kiwi.add_argument("--mode", default="usb")
+    sdr = ap.add_argument_group("sdrplay options")
+    sdr.add_argument("--list-sdrplay", action="store_true", help="list detected SDRplay devices and exit")
+    sdr.add_argument("--device-index", type=int, default=None, help="index into detected SDRplay devices")
+    sdr.add_argument("--device-args", type=str, default="", help="SoapySDR device args string, e.g. 'driver=sdrplay,serial=XXXX'")
+    sdr.add_argument("--sdr-rate", type=int, default=192000, help="SDR sample rate before decimation")
+    sdr.add_argument("--gain-db", type=float, default=None, help="Optional RF gain in dB")
     ap.add_argument("--freq-khz", type=float, default=14074.0, help="dial frequency in kHz (USB)")
-    ap.add_argument("--mode", default="usb")
     ap.add_argument("--rate", type=int, default=12000)
-    ap.add_argument("--wav", type=str, default="", help="offline mode: path to 12 kHz mono WAV to process")
+    ap.add_argument("--wav", type=str, default="", help="offline: path to 12 kHz mono WAV to process")
     ap.add_argument("--no-ui", action="store_true", help="disable curses UI; print plain lines")
-    ap.add_argument("--oneshot", action="store_true", help="connect to Kiwi, capture one 15s window, decode, exit")
+    ap.add_argument("--oneshot", action="store_true", help="capture one 15 s window, decode, exit")
     args = ap.parse_args()
 
     if args.wav:
         # Offline test mode: process a single 15 s window from a WAV
         from utils import read_wav
-        from tests.utils import DEFAULT_SEARCH_THRESHOLD
+        # DEFAULT_SEARCH_THRESHOLD is defined at module scope with a runtime-safe default
 
         audio = read_wav(args.wav)
         sym_len = int(audio.sample_rate_in_hz / TONE_SPACING_IN_HZ)
@@ -425,15 +646,65 @@ def main():
             curses.wrapper(_one)
         return
 
+    if args.source == "sdrplay" and args.list_sdrplay:
+        devs = SdrplayAudioSource.enumerate_devices()
+        if not devs:
+            print("No SDRplay devices detected via SoapySDR.")
+        else:
+            for i, d in enumerate(devs):
+                print(f"[{i}] {d}")
+        return
+
     if args.oneshot:
-        run_oneshot(args.host, args.port, args.freq_khz, args.mode, args.rate, no_ui=args.no_ui)
+        if args.source == "sdrplay":
+            # Resolve device args
+            dargs: dict | None = None
+            if args.device_args:
+                dargs = {}
+                for kv in args.device_args.split(','):
+                    if not kv:
+                        continue
+                    if '=' in kv:
+                        k, v = kv.split('=', 1)
+                        dargs[k.strip()] = v.strip()
+                    else:
+                        dargs[kv.strip()] = ""
+            elif args.device_index is not None:
+                devs = SdrplayAudioSource.enumerate_devices()
+                if args.device_index < 0 or args.device_index >= len(devs):
+                    print("Invalid --device-index; use --list-sdrplay to see devices", file=sys.stderr)
+                    sys.exit(2)
+                dargs = dict(devs[args.device_index])
+            run_oneshot_sdrplay(args.freq_khz, args.rate, args.sdr_rate, device_args=dargs, gain_db=args.gain_db, no_ui=args.no_ui)
+        else:
+            run_oneshot(args.host, args.port, args.freq_khz, args.mode, args.rate, no_ui=args.no_ui)
         return
 
     if args.no_ui:
         print("--no-ui is supported with --wav or --oneshot. For live monitoring use the curses UI.")
         return
 
-    # Dispatch by mode & availability
+    # Dispatch by source
+    if args.source == "sdrplay":
+        dargs: dict | None = None
+        if args.device_args:
+            dargs = {}
+            for kv in args.device_args.split(','):
+                if not kv:
+                    continue
+                if '=' in kv:
+                    k, v = kv.split('=', 1)
+                    dargs[k.strip()] = v.strip()
+                else:
+                    dargs[kv.strip()] = ""
+        elif args.device_index is not None:
+            devs = SdrplayAudioSource.enumerate_devices()
+            if args.device_index < 0 or args.device_index >= len(devs):
+                print("Invalid --device-index; use --list-sdrplay to see devices", file=sys.stderr)
+                sys.exit(2)
+            dargs = dict(devs[args.device_index])
+        return run_monitor_source(lambda: SdrplayAudioSource(args.freq_khz, audio_rate=args.rate, sdr_rate=args.sdr_rate, device_args=dargs, gain_db=args.gain_db))
+    # Else kiwi source
     if KiwiSDRStream is not None:
         run_monitor(args.host, args.port, args.freq_khz, args.mode, args.rate)
     else:
