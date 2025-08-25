@@ -427,7 +427,7 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
     # Decodes list (sorted externally). If comparison is active and jt9 results
     # are present, render two columns side-by-side aligned by message text.
     row = row_sep + 1
-    def _fmt_line(rec: dict) -> str:
+    def _fmt_line_ft8r(rec: dict) -> tuple[str, int]:
         snr = _snr_db_from_rec(rec)
         snr_str = f"{snr:+4.0f}dB" if (snr is not None and math.isfinite(snr)) else "   --"
         try:
@@ -435,27 +435,46 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
         except Exception:
             dt, fq = 0.0, 0.0
         msg = rec.get('message', '')
-        # Metrics columns (S, G, L) when present
-        cols = []
+        # Metrics columns (S, G, L) always shown; placeholders when missing
         s_val = rec.get('ft8r_search_score'); s_thr = rec.get('ft8r_search_thr')
         g_val = rec.get('ft8r_gate'); l_val = rec.get('ft8r_llr_avg')
+        def _fmt_s(v):
+            try:
+                return f"S={float(v):.2f}"
+            except Exception:
+                return "S=None"
+        def _fmt_g(v):
+            try:
+                return f"G={int(v)}"
+            except Exception:
+                return "G=None"
+        def _fmt_l(v):
+            try:
+                return f"L={float(v):.2f}"
+            except Exception:
+                return "L=None"
+        s_str = _fmt_s(s_val)
+        g_str = _fmt_g(g_val)
+        l_str = _fmt_l(l_val)
+        mcol = f"{s_str} {g_str} {l_str} "
+        # Color attribute if S<thr
+        attr = 0
         try:
-            if s_val is not None:
-                cols.append(f"S={float(s_val):.2f}")
+            if s_val is not None and s_thr is not None and float(s_val) < float(s_thr):
+                attr = curses.color_pair(1)
         except Exception:
-            pass
+            attr = 0
+        return f"{dt:+5.2f}s {fq:7.1f}Hz {snr_str:>6} {mcol}{msg}", attr
+
+    def _fmt_line_nometrics(rec: dict) -> str:
+        snr = _snr_db_from_rec(rec)
+        snr_str = f"{snr:+4.0f}dB" if (snr is not None and math.isfinite(snr)) else "   --"
         try:
-            if g_val is not None:
-                cols.append(f"G={int(g_val)}")
+            dt = float(rec.get('dt', 0.0)); fq = float(rec.get('freq', 0.0))
         except Exception:
-            pass
-        try:
-            if l_val is not None:
-                cols.append(f"L={float(l_val):.2f}")
-        except Exception:
-            pass
-        mcol = (" ".join(cols) + " ") if cols else ""
-        return f"{dt:+5.2f}s {fq:7.1f}Hz {snr_str:>6} {mcol}{msg}"
+            dt, fq = 0.0, 0.0
+        msg = rec.get('message', '')
+        return f"{dt:+5.2f}s {fq:7.1f}Hz {snr_str:>6} {msg}"
 
     jt9_list = None
     if cmp_status is not None:
@@ -492,34 +511,29 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
             stdscr.addstr(row, 0, f"{hdr_l} | {hdr_r}"[:w-1]); row += 1
         col_w = max(10, (w - 3) // 2)
         for left_rec, right_rec in pairs:
-            # Build left and right strings
-            left_attr = 0
+            # Build left (ft8r metrics) and right (jt9, no metrics) strings
             if left_rec is not None:
-                left = _fmt_line(left_rec)
+                left, left_attr = _fmt_line_ft8r(left_rec)
             else:
-                # If jt9-only, show our probe metrics and search score if available
-                probe = right_rec.get('ft8r_probe') if (right_rec and isinstance(right_rec, dict)) else None
-                s_val = right_rec.get('ft8r_search_score') if (right_rec and isinstance(right_rec, dict)) else None
-                s_thr = right_rec.get('ft8r_search_thr') if (right_rec and isinstance(right_rec, dict)) else None
-                s_fail = right_rec.get('ft8r_search_fail') if (right_rec and isinstance(right_rec, dict)) else None
-                parts = []
-                if probe:
-                    parts.append(str(probe))
-                if s_val is not None:
-                    try:
-                        sval = float(s_val); 
-                        if s_thr is not None and float(sval) < float(s_thr):
-                            parts.append(f"S={sval:.2f}<thr")
-                            try:
-                                left_attr = curses.color_pair(1)
-                            except Exception:
-                                left_attr = 0
-                        else:
-                            parts.append(f"S={sval:.2f}")
-                    except Exception:
-                        pass
-                left = " ".join(parts)
-            right = _fmt_line(right_rec) if right_rec is not None else ""
+                # For jt9-only gaps in ft8r column, synthesize a rec-like dict
+                # carrying our diagnostics extracted from jt9 decode
+                diag = {
+                    'dt': right_rec.get('dt') if right_rec else 0.0,
+                    'freq': right_rec.get('freq') if right_rec else 0.0,
+                    'message': '',
+                    'ft8r_probe': right_rec.get('ft8r_probe') if right_rec else None,
+                    'ft8r_search_score': right_rec.get('ft8r_search_score') if right_rec else None,
+                    'ft8r_search_thr': right_rec.get('ft8r_search_thr') if right_rec else None,
+                    'ft8r_gate': right_rec.get('ft8r_gate') if right_rec else None,
+                    'ft8r_llr_avg': right_rec.get('ft8r_llr_avg') if right_rec else None,
+                }
+                # Represent probe as part of message prefix for left column
+                probe = diag.get('ft8r_probe');
+                msg_prefix = (probe + ' ') if probe else ''
+                s, attr = _fmt_line_ft8r(diag)
+                left = msg_prefix + s
+                left_attr = attr
+            right = _fmt_line_nometrics(right_rec) if right_rec is not None else ""
             if row < h-1:
                 # Print left with potential color, then separator and right
                 left_print = left[:col_w].ljust(col_w)
@@ -537,16 +551,9 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
             else:
                 break
     else:
-        # Single-column mode (include metrics; color S<thr when present)
+        # Single-column mode (ft8r only): include metrics; color S<thr when present)
         for d in decodes:
-            line = _fmt_line(d)
-            attr = 0
-            try:
-                if d.get('ft8r_search_score') is not None and d.get('ft8r_search_thr') is not None:
-                    if float(d['ft8r_search_score']) < float(d['ft8r_search_thr']):
-                        attr = curses.color_pair(1)
-            except Exception:
-                attr = 0
+            line, attr = _fmt_line_ft8r(d)
             if row < h-1:
                 try:
                     stdscr.addstr(row, 0, line[:w-1], attr)
