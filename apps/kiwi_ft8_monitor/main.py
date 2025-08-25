@@ -1114,8 +1114,9 @@ def decode_with_jt9(audio: RealSamples) -> list[dict]:
 def _ft8r_costas_probe(audio: RealSamples, dt: float, freq: float) -> str | None:
     """Return a compact probe string for Costas sync at (dt,freq).
 
-    Computes the Costas energy sum and the number of symbols (out of 21) where
-    the expected Costas tone is the strongest among the 8 tones.
+    Reports the number of Costas gate matches (out of 21). This is a
+    diagnostic and does not influence decoding. The search gate value shown
+    separately (S=...) reflects the existing candidate thresholding.
     """
     try:
         bb, dt_ref, freq_ref = fine_sync_candidate(audio, freq, dt)
@@ -1129,19 +1130,10 @@ def _ft8r_costas_probe(audio: RealSamples, dt: float, freq: float) -> str | None
         # Costas positions and tones
         costas_pos = list(range(7)) + list(range(36, 43)) + list(range(72, 79))
         tones = COSTAS_SEQUENCE * 3
-        # Energy sum over Costas placements
-        energy = float(resp[tones, costas_pos].sum())
         # Gate matches: expected tone equals argmax at each Costas symbol
         max_idx = np.argmax(resp[:, costas_pos], axis=0)
         matches = int((max_idx == np.array(tones)).sum())
-        # Compact formatting for energy
-        if energy >= 1e6:
-            e_str = f"{energy/1e6:.1f}M"
-        elif energy >= 1e3:
-            e_str = f"{energy/1e3:.1f}k"
-        else:
-            e_str = f"{energy:.0f}"
-        return f"E={e_str} G={matches}/21"
+        return f"G={matches}/21"
     except Exception:
         return None
 if __name__ == "__main__":
