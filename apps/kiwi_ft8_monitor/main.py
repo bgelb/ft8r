@@ -470,7 +470,23 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
         s_str = _fmt_s(s_val)
         g_str = _fmt_g(g_val)
         l_str = _fmt_l(l_val)
-        mcol = f"{s_str} {g_str} {l_str} "
+        # Near-pruned indicator (nearest candidate by dt/freq within eps but below threshold)
+        np_str = ""
+        try:
+            if rec.get('ft8r_near_pruned'):
+                np_str = " N<thr"
+        except Exception:
+            np_str = ""
+        # Seeded decode outcome
+        seed_str = ""
+        try:
+            if rec.get('ft8r_seed_ok') is True:
+                seed_str = " Seed=Success!"
+            elif rec.get('ft8r_seed_ok') is False:
+                seed_str = " Seed=Fail"
+        except Exception:
+            seed_str = ""
+        mcol = f"{s_str} {g_str} {l_str}{np_str}{seed_str} "
         # Color attribute if S<thr
         attr = 0
         try:
@@ -534,12 +550,14 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
                 diag = {
                     'dt': right_rec.get('ft8r_cand_dt') if (right_rec and right_rec.get('ft8r_cand_dt') is not None) else (right_rec.get('dt') if right_rec else 0.0),
                     'freq': right_rec.get('ft8r_cand_freq') if (right_rec and right_rec.get('ft8r_cand_freq') is not None) else (right_rec.get('freq') if right_rec else 0.0),
-                    'message': (f"seed: {right_rec.get('ft8r_seed_msg')}" if (right_rec and right_rec.get('ft8r_seed_msg')) else ''),
+                    'message': '',
                     'ft8r_probe': right_rec.get('ft8r_probe') if right_rec else None,
                     'ft8r_search_score': right_rec.get('ft8r_search_score') if right_rec else None,
                     'ft8r_search_thr': right_rec.get('ft8r_search_thr') if right_rec else None,
                     'ft8r_gate': right_rec.get('ft8r_gate') if right_rec else None,
                     'ft8r_llr_avg': right_rec.get('ft8r_llr_avg') if right_rec else None,
+                    'ft8r_near_pruned': right_rec.get('ft8r_near_pruned') if right_rec else None,
+                    'ft8r_seed_ok': right_rec.get('ft8r_seed_ok') if right_rec else None,
                 }
                 # Represent probe as part of message prefix for left column
                 probe = diag.get('ft8r_probe');
@@ -673,6 +691,7 @@ def run_monitor_source(src_factory):
                                 r['ft8r_probe'] = probe
                             # Candidate near JT9 dt/freq?
                             cand_dt = None; cand_fq = None; cand_score = None
+                            near_best_by_dist = None; near_best_score = None
                             try:
                                 dtj = float(r.get('dt', 0.0)); fqj = float(r.get('freq', 0.0))
                                 if peaks_all:
@@ -681,12 +700,24 @@ def run_monitor_source(src_factory):
                                     if near:
                                         best = max(near, key=lambda p: p[0])
                                         cand_score, cand_dt, cand_fq = float(best[0]), float(best[1]), float(best[2])
+                                        # Also find the nearest by normalized distance
+                                        def _dist(p):
+                                            return ((abs(p[1]-dtj)/dt_eps)**2 + (abs(p[2]-fqj)/fq_eps)**2)
+                                        nb = min(near, key=_dist)
+                                        near_best_by_dist = nb
+                                        near_best_score = float(nb[0])
                             except Exception:
                                 pass
                             if cand_score is not None:
                                 r['ft8r_search_score'] = cand_score
                                 r['ft8r_search_thr'] = float(DEFAULT_SEARCH_THRESHOLD)
                                 r['ft8r_search_fail'] = bool(cand_score < float(DEFAULT_SEARCH_THRESHOLD))
+                            if near_best_by_dist is not None and near_best_score is not None:
+                                try:
+                                    r['ft8r_near_score'] = float(near_best_score)
+                                    r['ft8r_near_pruned'] = bool(float(near_best_score) < float(DEFAULT_SEARCH_THRESHOLD))
+                                except Exception:
+                                    pass
                             # Only compute G/L if candidate passed search gate; else leave None
                             if cand_score is not None and cand_score >= float(DEFAULT_SEARCH_THRESHOLD):
                                 try:
@@ -702,8 +733,8 @@ def run_monitor_source(src_factory):
                             # Seeded decode attempt using JT9 dt/freq regardless of candidate matching
                             try:
                                 ok, msg, dt_seed, fq_seed = _ft8r_seeded_decode(audio, float(r.get('dt', 0.0)), float(r.get('freq', 0.0)))
+                                r['ft8r_seed_ok'] = bool(ok)
                                 if ok:
-                                    r['ft8r_seed_msg'] = msg
                                     r['ft8r_seed_dt'] = dt_seed
                                     r['ft8r_seed_freq'] = fq_seed
                             except Exception:
