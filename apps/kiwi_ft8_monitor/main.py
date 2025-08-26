@@ -567,18 +567,7 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
                 except Exception:
                     left_dt_val = 0.0; left_fq_val = 0.0
             right = _fmt_line_nometrics(right_rec) if right_rec is not None else ""
-            # Highlight mismatches vs JT9 in yellow when |df|>0.5 Hz or |dt|>0.05 s
-            try:
-                if right_rec is not None:
-                    dt_j = float(right_rec.get('dt', 0.0))
-                    fq_j = float(right_rec.get('freq', 0.0))
-                    if abs(left_dt_val - dt_j) > 0.05 or abs(left_fq_val - fq_j) > 0.5:
-                        try:
-                            left_attr = curses.color_pair(2)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+            # Segment-level mismatch highlighting is applied below; do not change base attribute here.
             if row < h-1:
                 # Print left with segment highlighting for dt/freq mismatches
                 base_attr = left_attr
