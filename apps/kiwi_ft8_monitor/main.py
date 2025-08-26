@@ -606,17 +606,71 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
                     except Exception:
                         stdscr.addstr(row, pos, fq_draw)
                     pos += len(fq_draw); remain = col_w - pos
-                # Rest of the left string
+                # Rest of the left string, with colored Seed outcome when present
                 rest = left[len(dt_seg) + 1 + len(fq_seg):]
                 if remain > 0:
-                    rest_draw = rest[:remain].ljust(remain)
-                    try:
-                        if base_attr:
-                            stdscr.addstr(row, pos, rest_draw, base_attr)
-                        else:
+                    seed_ok_str = " Seed=Success!"
+                    seed_fail_str = " Seed=Fail"
+                    idx = -1
+                    seed_attr = 0
+                    seed_len = 0
+                    if rest.find(seed_ok_str) != -1:
+                        idx = rest.find(seed_ok_str)
+                        seed_len = len(seed_ok_str)
+                        try:
+                            seed_attr = curses.color_pair(3)
+                        except Exception:
+                            seed_attr = 0
+                    elif rest.find(seed_fail_str) != -1:
+                        idx = rest.find(seed_fail_str)
+                        seed_len = len(seed_fail_str)
+                        try:
+                            seed_attr = curses.color_pair(1)
+                        except Exception:
+                            seed_attr = 0
+                    if idx >= 0 and idx < remain:
+                        # Prefix before seed substring
+                        pref = rest[:idx]
+                        pref_draw = pref[:remain]
+                        try:
+                            if base_attr:
+                                stdscr.addstr(row, pos, pref_draw, base_attr)
+                            else:
+                                stdscr.addstr(row, pos, pref_draw)
+                        except Exception:
+                            stdscr.addstr(row, pos, pref_draw)
+                        pos += len(pref_draw); remain = col_w - pos
+                        # Seed substring
+                        if remain > 0:
+                            seed_draw = rest[idx:idx+seed_len][:remain]
+                            try:
+                                if seed_attr:
+                                    stdscr.addstr(row, pos, seed_draw, seed_attr)
+                                else:
+                                    stdscr.addstr(row, pos, seed_draw)
+                            except Exception:
+                                stdscr.addstr(row, pos, seed_draw)
+                            pos += len(seed_draw); remain = col_w - pos
+                        # Suffix after seed
+                        if remain > 0:
+                            suf = rest[idx+seed_len:]
+                            suf_draw = suf[:remain].ljust(remain)
+                            try:
+                                if base_attr:
+                                    stdscr.addstr(row, pos, suf_draw, base_attr)
+                                else:
+                                    stdscr.addstr(row, pos, suf_draw)
+                            except Exception:
+                                stdscr.addstr(row, pos, suf_draw)
+                    else:
+                        rest_draw = rest[:remain].ljust(remain)
+                        try:
+                            if base_attr:
+                                stdscr.addstr(row, pos, rest_draw, base_attr)
+                            else:
+                                stdscr.addstr(row, pos, rest_draw)
+                        except Exception:
                             stdscr.addstr(row, pos, rest_draw)
-                    except Exception:
-                        stdscr.addstr(row, pos, rest_draw)
                 # Separator and right column
                 sep = " | "
                 stdscr.addstr(row, col_w, sep)
@@ -651,7 +705,10 @@ def run_monitor_source(src_factory):
             curses.curs_set(0)
             stdscr.nodelay(True)
             try:
-                curses.start_color(); curses.use_default_colors(); curses.init_pair(1, curses.COLOR_RED, -1); curses.init_pair(2, curses.COLOR_YELLOW, -1)
+                curses.start_color(); curses.use_default_colors();
+                curses.init_pair(1, curses.COLOR_RED, -1)      # red
+                curses.init_pair(2, curses.COLOR_YELLOW, -1)   # yellow
+                curses.init_pair(3, curses.COLOR_GREEN, -1)    # green
             except Exception:
                 pass
             last_decodes: List[dict] = []
