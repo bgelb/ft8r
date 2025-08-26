@@ -580,18 +580,58 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
             except Exception:
                 pass
             if row < h-1:
-                # Print left with potential color, then separator and right
-                left_print = left[:col_w].ljust(col_w)
+                # Print left with segment highlighting for dt/freq mismatches
+                base_attr = left_attr
+                pos = 0
+                remain = col_w
+                dt_seg = f"{left_dt_val:+5.2f}s"
+                fq_seg = f"{left_fq_val:7.1f}Hz"
+                # dt segment
+                dt_draw = dt_seg[:remain]
                 try:
-                    if left_attr:
-                        stdscr.addstr(row, 0, left_print, left_attr)
-                    else:
-                        stdscr.addstr(row, 0, left_print)
+                    dt_attr = curses.color_pair(2) if (right_rec is not None and abs(left_dt_val - float(right_rec.get('dt', 0.0))) > 0.05) else base_attr
                 except Exception:
-                    stdscr.addstr(row, 0, left_print)
+                    dt_attr = base_attr
+                try:
+                    if dt_attr:
+                        stdscr.addstr(row, pos, dt_draw, dt_attr)
+                    else:
+                        stdscr.addstr(row, pos, dt_draw)
+                except Exception:
+                    stdscr.addstr(row, pos, dt_draw)
+                pos += len(dt_draw); remain = col_w - pos
+                if remain > 0:
+                    stdscr.addstr(row, pos, " "); pos += 1; remain -= 1
+                # freq segment
+                if remain > 0:
+                    fq_draw = fq_seg[:remain]
+                    try:
+                        fq_attr = curses.color_pair(2) if (right_rec is not None and abs(left_fq_val - float(right_rec.get('freq', 0.0))) > 0.5) else base_attr
+                    except Exception:
+                        fq_attr = base_attr
+                    try:
+                        if fq_attr:
+                            stdscr.addstr(row, pos, fq_draw, fq_attr)
+                        else:
+                            stdscr.addstr(row, pos, fq_draw)
+                    except Exception:
+                        stdscr.addstr(row, pos, fq_draw)
+                    pos += len(fq_draw); remain = col_w - pos
+                # Rest of the left string
+                rest = left[len(dt_seg) + 1 + len(fq_seg):]
+                if remain > 0:
+                    rest_draw = rest[:remain].ljust(remain)
+                    try:
+                        if base_attr:
+                            stdscr.addstr(row, pos, rest_draw, base_attr)
+                        else:
+                            stdscr.addstr(row, pos, rest_draw)
+                    except Exception:
+                        stdscr.addstr(row, pos, rest_draw)
+                # Separator and right column
                 sep = " | "
-                stdscr.addstr(row, len(left_print), sep)
-                stdscr.addstr(row, len(left_print) + len(sep), right[:col_w].ljust(col_w)[: w - (len(left_print)+len(sep)) - 1])
+                stdscr.addstr(row, col_w, sep)
+                stdscr.addstr(row, col_w + len(sep), right[:col_w].ljust(col_w)[: w - (col_w+len(sep)) - 1])
                 row += 1
             else:
                 break
