@@ -36,9 +36,6 @@ from demod import (
     soft_demod,
     naive_hard_decode,
     ldpc_decode,
-    downsample_to_baseband,
-    fine_time_sync,
-    fine_freq_sync,
 )
 from utils import (
     FT8_SYMBOL_LENGTH_IN_SEC,
@@ -562,11 +559,9 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
                     'ft8r_near_pruned': right_rec.get('ft8r_near_pruned') if right_rec else None,
                     'ft8r_seed_ok': right_rec.get('ft8r_seed_ok') if right_rec else None,
                 }
-                # Represent probe as part of message prefix for left column
-                probe = diag.get('ft8r_probe');
-                msg_prefix = (probe + ' ') if probe else ''
+                # Render with standard ft8r metrics ordering to align columns
                 s, attr = _fmt_line_ft8r(diag)
-                left = msg_prefix + s
+                left = s
                 left_attr = attr
             right = _fmt_line_nometrics(right_rec) if right_rec is not None else ""
             if row < h-1:
@@ -1327,16 +1322,7 @@ def _ft8r_seeded_decode(audio: RealSamples, dt: float, freq: float) -> tuple[boo
     Returns (ok, message, dt_refined, freq_refined). ok=True only if CRC passes.
     """
     try:
-        # Widen initial fine-time search (~0.1 s) before refining frequency.
-        bb0 = downsample_to_baseband(audio, freq)
-        sr = bb0.sample_rate_in_hz
-        wide = max(20, int(0.1 * sr))
-        dt1 = fine_time_sync(bb0, dt, wide)
-        df1 = fine_freq_sync(bb0, dt1, 5.0, 0.25)
-        freq1 = freq + df1
-        bb1 = downsample_to_baseband(audio, freq1)
-        dt2 = fine_time_sync(bb1, dt1, 4)
-        bb, dt_f, freq_f = bb1, dt2, freq1
+        bb, dt_f, freq_f = fine_sync_candidate(audio, freq, dt)
         llrs = soft_demod(bb)
         bits_h = naive_hard_decode(llrs)
         if check_crc(bits_h):
