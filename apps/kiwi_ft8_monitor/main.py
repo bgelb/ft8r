@@ -674,7 +674,9 @@ def run_monitor_source(src_factory):
                     t0 = time.perf_counter()
                     decs = decode_full_period(audio, threshold=DEFAULT_SEARCH_THRESHOLD)
                     # Attach per-decode diagnostics (search score S, gate G, LLR avg L)
-                    # Build search score at each decode's (dt,freq) if map available
+                    # Use the coarse candidate score returned by the pipeline for S,
+                    # since that is the value used for gating. Fallback to map lookup
+                    # only if the coarse score is missing.
                     if decs:
                         try:
                             import numpy as _np
@@ -693,7 +695,17 @@ def run_monitor_source(src_factory):
                                     dtd = float(r.get('dt', 0.0)); fqd = float(r.get('freq', 0.0))
                                 except Exception:
                                     dtd, fqd = 0.0, 0.0
-                                if scores_map is not None and dts_arr is not None and freqs_arr is not None:
+                                # Prefer the coarse candidate score produced by the pipeline.
+                                s_coarse = r.get('score')
+                                if isinstance(s_coarse, (int, float)):
+                                    try:
+                                        sval = float(s_coarse)
+                                        r['ft8r_search_score'] = sval
+                                        r['ft8r_search_thr'] = float(DEFAULT_SEARCH_THRESHOLD)
+                                        r['ft8r_search_fail'] = bool(sval < float(DEFAULT_SEARCH_THRESHOLD))
+                                    except Exception:
+                                        pass
+                                elif scores_map is not None and dts_arr is not None and freqs_arr is not None:
                                     try:
                                         ii = int(_np.argmin(_np.abs(dts_arr - dtd)))
                                         jj = int(_np.argmin(_np.abs(freqs_arr - fqd)))
