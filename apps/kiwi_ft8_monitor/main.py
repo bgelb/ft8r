@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover - best effort import
     KiwiSDRStream = None  # type: ignore
 
 from utils import RealSamples
-from search import find_candidates
+from search import find_candidates, candidate_score_map, peak_candidates
 """Runtime configuration values with safe defaults."""
 # Threshold used during candidate search/decoding. Try to import from tests when
 # running inside the repo (developer environment), but default to a safe value
@@ -29,7 +29,22 @@ try:  # pragma: no cover - optional import for dev environment
     DEFAULT_SEARCH_THRESHOLD = _DEFAULT_SEARCH_THRESHOLD
 except Exception:  # pragma: no cover - production/runtime fallback
     DEFAULT_SEARCH_THRESHOLD = 1.0
-from demod import decode_full_period, TONE_SPACING_IN_HZ
+from demod import (
+    decode_full_period,
+    TONE_SPACING_IN_HZ,
+    fine_sync_candidate,
+    soft_demod,
+    naive_hard_decode,
+    ldpc_decode,
+)
+from utils import (
+    FT8_SYMBOL_LENGTH_IN_SEC,
+    FT8_SYMBOLS_PER_MESSAGE,
+    COSTAS_SEQUENCE,
+    COSTAS_START_OFFSET_SEC,
+    check_crc,
+    decode77,
+)
 
 
 @dataclass
@@ -426,7 +441,55 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
     # Decodes list (sorted externally). If comparison is active and jt9 results
     # are present, render two columns side-by-side aligned by message text.
     row = row_sep + 1
-    def _fmt_line(rec: dict) -> str:
+    def _fmt_line_ft8r(rec: dict) -> tuple[str, int]:
+        snr = _snr_db_from_rec(rec)
+        snr_str = f"{snr:+4.0f}dB" if (snr is not None and math.isfinite(snr)) else "   --"
+        try:
+            dt = float(rec.get('dt', 0.0)); fq = float(rec.get('freq', 0.0))
+        except Exception:
+            dt, fq = 0.0, 0.0
+        msg = rec.get('message', '')
+        # Metrics columns (S, G, L) always shown; placeholders when missing
+        s_val = rec.get('ft8r_search_score'); s_thr = rec.get('ft8r_search_thr')
+        g_val = rec.get('ft8r_gate'); l_val = rec.get('ft8r_llr_avg')
+        def _fmt_s(v):
+            try:
+                return f"S={float(v):.2f}"
+            except Exception:
+                return "S=None"
+        def _fmt_g(v):
+            try:
+                return f"G={int(v)}"
+            except Exception:
+                return "G=None"
+        def _fmt_l(v):
+            try:
+                return f"L={float(v):.2f}"
+            except Exception:
+                return "L=None"
+        s_str = _fmt_s(s_val)
+        g_str = _fmt_g(g_val)
+        l_str = _fmt_l(l_val)
+        # Seeded decode outcome
+        seed_str = ""
+        try:
+            if rec.get('ft8r_seed_ok') is True:
+                seed_str = " Seed=Success!"
+            elif rec.get('ft8r_seed_ok') is False:
+                seed_str = " Seed=Fail"
+        except Exception:
+            seed_str = ""
+        mcol = f"{s_str} {g_str} {l_str}{seed_str} "
+        # Color attribute if S<thr
+        attr = 0
+        try:
+            if s_val is not None and s_thr is not None and float(s_val) < float(s_thr):
+                attr = curses.color_pair(1)
+        except Exception:
+            attr = 0
+        return f"{dt:+5.2f}s {fq:7.1f}Hz {snr_str:>6} {mcol}{msg}", attr
+
+    def _fmt_line_nometrics(rec: dict) -> str:
         snr = _snr_db_from_rec(rec)
         snr_str = f"{snr:+4.0f}dB" if (snr is not None and math.isfinite(snr)) else "   --"
         try:
@@ -471,19 +534,159 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
             stdscr.addstr(row, 0, f"{hdr_l} | {hdr_r}"[:w-1]); row += 1
         col_w = max(10, (w - 3) // 2)
         for left_rec, right_rec in pairs:
-            left = _fmt_line(left_rec) if left_rec is not None else ""
-            right = _fmt_line(right_rec) if right_rec is not None else ""
+            # Build left (ft8r metrics) and right (jt9, no metrics) strings
+            if left_rec is not None:
+                left, left_attr = _fmt_line_ft8r(left_rec)
+                # Values used for mismatch highlighting
+                try:
+                    left_dt_val = float(left_rec.get('dt', 0.0))
+                    left_fq_val = float(left_rec.get('freq', 0.0))
+                except Exception:
+                    left_dt_val = 0.0; left_fq_val = 0.0
+            else:
+                # For jt9-only gaps in ft8r column, synthesize a rec-like dict
+                # carrying our diagnostics extracted from jt9 decode
+                diag = {
+                    'dt': right_rec.get('ft8r_cand_dt') if (right_rec and right_rec.get('ft8r_cand_dt') is not None) else (right_rec.get('dt') if right_rec else 0.0),
+                    'freq': right_rec.get('ft8r_cand_freq') if (right_rec and right_rec.get('ft8r_cand_freq') is not None) else (right_rec.get('freq') if right_rec else 0.0),
+                    'message': '',
+                    'ft8r_probe': right_rec.get('ft8r_probe') if right_rec else None,
+                    'ft8r_search_score': right_rec.get('ft8r_search_score') if right_rec else None,
+                    'ft8r_search_thr': right_rec.get('ft8r_search_thr') if right_rec else None,
+                    'ft8r_gate': right_rec.get('ft8r_gate') if right_rec else None,
+                    'ft8r_llr_avg': right_rec.get('ft8r_llr_avg') if right_rec else None,
+                    'ft8r_seed_ok': right_rec.get('ft8r_seed_ok') if right_rec else None,
+                }
+                # Render with standard ft8r metrics ordering to align columns
+                s, attr = _fmt_line_ft8r(diag)
+                left = s
+                left_attr = attr
+                try:
+                    left_dt_val = float(diag.get('dt', 0.0))
+                    left_fq_val = float(diag.get('freq', 0.0))
+                except Exception:
+                    left_dt_val = 0.0; left_fq_val = 0.0
+            right = _fmt_line_nometrics(right_rec) if right_rec is not None else ""
+            # Segment-level mismatch highlighting is applied below; do not change base attribute here.
             if row < h-1:
-                stdscr.addstr(row, 0, f"{left[:col_w].ljust(col_w)} | {right[:col_w].ljust(col_w)}"[:w-1])
+                # Print left with segment highlighting for dt/freq mismatches
+                base_attr = left_attr
+                pos = 0
+                remain = col_w
+                dt_seg = f"{left_dt_val:+5.2f}s"
+                fq_seg = f"{left_fq_val:7.1f}Hz"
+                # dt segment
+                dt_draw = dt_seg[:remain]
+                try:
+                    dt_attr = curses.color_pair(2) if (right_rec is not None and abs(left_dt_val - float(right_rec.get('dt', 0.0))) > 0.05) else base_attr
+                except Exception:
+                    dt_attr = base_attr
+                try:
+                    if dt_attr:
+                        stdscr.addstr(row, pos, dt_draw, dt_attr)
+                    else:
+                        stdscr.addstr(row, pos, dt_draw)
+                except Exception:
+                    stdscr.addstr(row, pos, dt_draw)
+                pos += len(dt_draw); remain = col_w - pos
+                if remain > 0:
+                    stdscr.addstr(row, pos, " "); pos += 1; remain -= 1
+                # freq segment
+                if remain > 0:
+                    fq_draw = fq_seg[:remain]
+                    try:
+                        fq_attr = curses.color_pair(2) if (right_rec is not None and abs(left_fq_val - float(right_rec.get('freq', 0.0))) > 0.5) else base_attr
+                    except Exception:
+                        fq_attr = base_attr
+                    try:
+                        if fq_attr:
+                            stdscr.addstr(row, pos, fq_draw, fq_attr)
+                        else:
+                            stdscr.addstr(row, pos, fq_draw)
+                    except Exception:
+                        stdscr.addstr(row, pos, fq_draw)
+                    pos += len(fq_draw); remain = col_w - pos
+                # Rest of the left string, with colored Seed outcome when present
+                rest = left[len(dt_seg) + 1 + len(fq_seg):]
+                if remain > 0:
+                    seed_ok_str = " Seed=Success!"
+                    seed_fail_str = " Seed=Fail"
+                    idx = -1
+                    seed_attr = 0
+                    seed_len = 0
+                    if rest.find(seed_ok_str) != -1:
+                        idx = rest.find(seed_ok_str)
+                        seed_len = len(seed_ok_str)
+                        try:
+                            seed_attr = curses.color_pair(3)
+                        except Exception:
+                            seed_attr = 0
+                    elif rest.find(seed_fail_str) != -1:
+                        idx = rest.find(seed_fail_str)
+                        seed_len = len(seed_fail_str)
+                        try:
+                            seed_attr = curses.color_pair(1)
+                        except Exception:
+                            seed_attr = 0
+                    if idx >= 0 and idx < remain:
+                        # Prefix before seed substring
+                        pref = rest[:idx]
+                        pref_draw = pref[:remain]
+                        try:
+                            if base_attr:
+                                stdscr.addstr(row, pos, pref_draw, base_attr)
+                            else:
+                                stdscr.addstr(row, pos, pref_draw)
+                        except Exception:
+                            stdscr.addstr(row, pos, pref_draw)
+                        pos += len(pref_draw); remain = col_w - pos
+                        # Seed substring
+                        if remain > 0:
+                            seed_draw = rest[idx:idx+seed_len][:remain]
+                            try:
+                                if seed_attr:
+                                    stdscr.addstr(row, pos, seed_draw, seed_attr)
+                                else:
+                                    stdscr.addstr(row, pos, seed_draw)
+                            except Exception:
+                                stdscr.addstr(row, pos, seed_draw)
+                            pos += len(seed_draw); remain = col_w - pos
+                        # Suffix after seed
+                        if remain > 0:
+                            suf = rest[idx+seed_len:]
+                            suf_draw = suf[:remain].ljust(remain)
+                            try:
+                                if base_attr:
+                                    stdscr.addstr(row, pos, suf_draw, base_attr)
+                                else:
+                                    stdscr.addstr(row, pos, suf_draw)
+                            except Exception:
+                                stdscr.addstr(row, pos, suf_draw)
+                    else:
+                        rest_draw = rest[:remain].ljust(remain)
+                        try:
+                            if base_attr:
+                                stdscr.addstr(row, pos, rest_draw, base_attr)
+                            else:
+                                stdscr.addstr(row, pos, rest_draw)
+                        except Exception:
+                            stdscr.addstr(row, pos, rest_draw)
+                # Separator and right column
+                sep = " | "
+                stdscr.addstr(row, col_w, sep)
+                stdscr.addstr(row, col_w + len(sep), right[:col_w].ljust(col_w)[: w - (col_w+len(sep)) - 1])
                 row += 1
             else:
                 break
     else:
-        # Single-column mode
+        # Single-column mode (ft8r only): include metrics; color S<thr when present)
         for d in decodes:
-            line = _fmt_line(d)
+            line, attr = _fmt_line_ft8r(d)
             if row < h-1:
-                stdscr.addstr(row, 0, line[:w-1])
+                try:
+                    stdscr.addstr(row, 0, line[:w-1], attr)
+                except Exception:
+                    stdscr.addstr(row, 0, line[:w-1])
                 row += 1
             else:
                 break
@@ -501,6 +704,13 @@ def run_monitor_source(src_factory):
         def _main(stdscr):
             curses.curs_set(0)
             stdscr.nodelay(True)
+            try:
+                curses.start_color(); curses.use_default_colors();
+                curses.init_pair(1, curses.COLOR_RED, -1)      # red
+                curses.init_pair(2, curses.COLOR_YELLOW, -1)   # yellow
+                curses.init_pair(3, curses.COLOR_GREEN, -1)    # green
+            except Exception:
+                pass
             last_decodes: List[dict] = []
             last_metrics = Metrics()
             nb = next_strict_boundary_utc(time.time())
@@ -513,12 +723,133 @@ def run_monitor_source(src_factory):
                     max_dt_samples = len(audio.samples) - int(audio.sample_rate_in_hz * 0.5)
                     max_dt_symbols = -(-max_dt_samples // sym_len)
                     cand_count = len(find_candidates(audio, max_freq_bin, max_dt_symbols, threshold=DEFAULT_SEARCH_THRESHOLD))
+                    # Precompute search score map for debug annotations
+                    try:
+                        scores_map, dts_arr, freqs_arr = candidate_score_map(audio, max_freq_bin, max_dt_symbols)
+                    except Exception:
+                        scores_map = None; dts_arr = None; freqs_arr = None
                     t0 = time.perf_counter()
                     decs = decode_full_period(audio, threshold=DEFAULT_SEARCH_THRESHOLD)
+                    # Attach per-decode diagnostics (search score S, gate G, LLR avg L)
+                    # Use the coarse candidate score returned by the pipeline for S,
+                    # since that is the value used for gating. Fallback to map lookup
+                    # only if the coarse score is missing.
+                    if decs:
+                        try:
+                            import numpy as _np
+                            # Precompute map if not already done above
+                            try:
+                                scores_map
+                            except NameError:
+                                scores_map = None
+                            if 'scores_map' not in locals() or scores_map is None:
+                                try:
+                                    scores_map, dts_arr, freqs_arr = candidate_score_map(audio, max_freq_bin, max_dt_symbols)
+                                except Exception:
+                                    scores_map = None; dts_arr = None; freqs_arr = None
+                            for r in decs:
+                                try:
+                                    dtd = float(r.get('dt', 0.0)); fqd = float(r.get('freq', 0.0))
+                                except Exception:
+                                    dtd, fqd = 0.0, 0.0
+                                # Prefer the coarse candidate score produced by the pipeline.
+                                s_coarse = r.get('score')
+                                if isinstance(s_coarse, (int, float)):
+                                    try:
+                                        sval = float(s_coarse)
+                                        r['ft8r_search_score'] = sval
+                                        r['ft8r_search_thr'] = float(DEFAULT_SEARCH_THRESHOLD)
+                                        r['ft8r_search_fail'] = bool(sval < float(DEFAULT_SEARCH_THRESHOLD))
+                                    except Exception:
+                                        pass
+                                elif scores_map is not None and dts_arr is not None and freqs_arr is not None:
+                                    try:
+                                        ii = int(_np.argmin(_np.abs(dts_arr - dtd)))
+                                        jj = int(_np.argmin(_np.abs(freqs_arr - fqd)))
+                                        sval = float(scores_map[ii, jj])
+                                        r['ft8r_search_score'] = sval
+                                        r['ft8r_search_thr'] = float(DEFAULT_SEARCH_THRESHOLD)
+                                        r['ft8r_search_fail'] = bool(sval < float(DEFAULT_SEARCH_THRESHOLD))
+                                    except Exception:
+                                        pass
+                                # Compute gate matches and LLR average
+                                g = _ft8r_compute_gate(audio, dtd, fqd)
+                                if g is not None:
+                                    r['ft8r_gate'] = int(g)
+                                la = _ft8r_compute_llr_avg(audio, dtd, fqd)
+                                if la is not None:
+                                    r['ft8r_llr_avg'] = float(la)
+                        except Exception:
+                            pass
                     # Optional WSJT-X comparison
                     cmp_status = None
                     if getattr(run_monitor_source, "_compare_wsjt", False):
                         jt9_decs = decode_with_jt9(audio)
+                        # Precompute local-max candidates at threshold=0 for proximity matching
+                        peaks_all = []
+                        if scores_map is not None and dts_arr is not None and freqs_arr is not None:
+                            try:
+                                peaks_all = peak_candidates(scores_map, dts_arr, freqs_arr, threshold=0.0)
+                            except Exception:
+                                peaks_all = []
+                        # Attach ft8r diagnostics to each jt9 decode for UI gaps
+                        for r in jt9_decs:
+                            try:
+                                probe = _ft8r_costas_probe(audio, float(r.get('dt', 0.0)), float(r.get('freq', 0.0)))
+                            except Exception:
+                                probe = None
+                            if probe:
+                                r['ft8r_probe'] = probe
+                            # Candidate near JT9 dt/freq?
+                            cand_dt = None; cand_fq = None; cand_score = None
+                            near_best_by_dist = None; near_best_score = None
+                            try:
+                                dtj = float(r.get('dt', 0.0)); fqj = float(r.get('freq', 0.0))
+                                if peaks_all:
+                                    dt_eps = 0.10; fq_eps = max(2.0, TONE_SPACING_IN_HZ)
+                                    near = [p for p in peaks_all if abs(p[1]-dtj) <= dt_eps and abs(p[2]-fqj) <= fq_eps]
+                                    if near:
+                                        best = max(near, key=lambda p: p[0])
+                                        cand_score, cand_dt, cand_fq = float(best[0]), float(best[1]), float(best[2])
+                                        # Also find the nearest by normalized distance
+                                        def _dist(p):
+                                            return ((abs(p[1]-dtj)/dt_eps)**2 + (abs(p[2]-fqj)/fq_eps)**2)
+                                        nearest_peak = min(near, key=_dist)
+                                        near_best_by_dist = nearest_peak
+                                        near_best_score = float(nearest_peak[0])
+                            except Exception:
+                                pass
+                            if cand_score is not None:
+                                r['ft8r_search_score'] = cand_score
+                                r['ft8r_search_thr'] = float(DEFAULT_SEARCH_THRESHOLD)
+                                r['ft8r_search_fail'] = bool(cand_score < float(DEFAULT_SEARCH_THRESHOLD))
+                            if near_best_by_dist is not None and near_best_score is not None:
+                                try:
+                                    r['ft8r_near_score'] = float(near_best_score)
+                                    r['ft8r_near_pruned'] = bool(float(near_best_score) < float(DEFAULT_SEARCH_THRESHOLD))
+                                except Exception:
+                                    pass
+                            # Only compute G/L if candidate passed search gate; else leave None
+                            if cand_score is not None and cand_score >= float(DEFAULT_SEARCH_THRESHOLD):
+                                try:
+                                    g2 = _ft8r_compute_gate(audio, cand_dt, cand_fq) if (cand_dt is not None and cand_fq is not None) else None
+                                    if g2 is not None:
+                                        r['ft8r_gate'] = int(g2)
+                                    la2 = _ft8r_compute_llr_avg(audio, cand_dt, cand_fq) if (cand_dt is not None and cand_fq is not None) else None
+                                    if la2 is not None:
+                                        r['ft8r_llr_avg'] = float(la2)
+                                    r['ft8r_cand_dt'] = cand_dt; r['ft8r_cand_freq'] = cand_fq
+                                except Exception:
+                                    pass
+                            # Seeded decode attempt using JT9 dt/freq regardless of candidate matching
+                            try:
+                                ok, msg, dt_seed, fq_seed = _ft8r_seeded_decode(audio, float(r.get('dt', 0.0)), float(r.get('freq', 0.0)))
+                                r['ft8r_seed_ok'] = bool(ok)
+                                if ok:
+                                    r['ft8r_seed_dt'] = dt_seed
+                                    r['ft8r_seed_freq'] = fq_seed
+                            except Exception:
+                                pass
                         ours_msgs = {d.get('message', '') for d in decs}
                         jt9_msgs = {d.get('message', '') for d in jt9_decs}
                         both = ours_msgs & jt9_msgs
@@ -862,6 +1193,13 @@ def main():
                 cmp_status = None
                 if args.compare_wsjtx:
                     jt9_decs = decode_with_jt9(audio)
+                    for r in jt9_decs:
+                        try:
+                            probe = _ft8r_costas_probe(audio, float(r.get('dt', 0.0)), float(r.get('freq', 0.0)))
+                        except Exception:
+                            probe = None
+                        if probe:
+                            r['ft8r_probe'] = probe
                     ours_msgs = {r['message'] for r in decs}
                     jt9_msgs = {r['message'] for r in jt9_decs}
                     both = ours_msgs & jt9_msgs
@@ -1034,5 +1372,79 @@ def decode_with_jt9(audio: RealSamples) -> list[dict]:
             os.remove(wav_path)
         except Exception:
             pass
+
+
+def _ft8r_costas_probe(audio: RealSamples, dt: float, freq: float) -> str | None:
+    """Return a compact probe string for Costas sync at (dt,freq).
+
+    Reports the number of Costas gate matches (out of 21). This is a
+    diagnostic and does not influence decoding. The search gate value shown
+    separately (S=...) reflects the existing candidate thresholding.
+    """
+    try:
+        bb, dt_ref, freq_ref = fine_sync_candidate(audio, freq, dt)
+        sr = bb.sample_rate_in_hz
+        sym_len = int(round(sr * FT8_SYMBOL_LENGTH_IN_SEC))
+        seg = bb.samples[: sym_len * FT8_SYMBOLS_PER_MESSAGE].reshape(FT8_SYMBOLS_PER_MESSAGE, sym_len)
+        # Tone response magnitudes squared for each symbol
+        time_idx = np.arange(sym_len) / sr
+        bases = np.exp(-2j * np.pi * (np.arange(8)[:, None] * TONE_SPACING_IN_HZ) * time_idx[None, :])
+        resp = np.abs(bases @ seg.T) ** 2  # (8, 79)
+        # Costas positions and tones
+        costas_pos = list(range(7)) + list(range(36, 43)) + list(range(72, 79))
+        tones = COSTAS_SEQUENCE * 3
+        # Gate matches: expected tone equals argmax at each Costas symbol
+        max_idx = np.argmax(resp[:, costas_pos], axis=0)
+        matches = int((max_idx == np.array(tones)).sum())
+        return f"G={matches}/21"
+    except Exception:
+        return None
+
+
+def _ft8r_compute_gate(audio: RealSamples, dt: float, freq: float) -> int | None:
+    try:
+        bb, dt_ref, freq_ref = fine_sync_candidate(audio, freq, dt)
+        sr = bb.sample_rate_in_hz
+        sym_len = int(round(sr * FT8_SYMBOL_LENGTH_IN_SEC))
+        seg = bb.samples[: sym_len * FT8_SYMBOLS_PER_MESSAGE].reshape(FT8_SYMBOLS_PER_MESSAGE, sym_len)
+        time_idx = np.arange(sym_len) / sr
+        bases = np.exp(-2j * np.pi * (np.arange(8)[:, None] * TONE_SPACING_IN_HZ) * time_idx[None, :])
+        resp = np.abs(bases @ seg.T) ** 2  # (8, 79)
+        costas_pos = list(range(7)) + list(range(36, 43)) + list(range(72, 79))
+        tones = COSTAS_SEQUENCE * 3
+        max_idx = np.argmax(resp[:, costas_pos], axis=0)
+        matches = int((max_idx == np.array(tones)).sum())
+        return matches
+    except Exception:
+        return None
+
+
+def _ft8r_compute_llr_avg(audio: RealSamples, dt: float, freq: float) -> float | None:
+    try:
+        bb, dt_ref, freq_ref = fine_sync_candidate(audio, freq, dt)
+        llrs = soft_demod(bb)
+        import numpy as _np
+        return float(_np.mean(_np.abs(llrs)))
+    except Exception:
+        return None
+
+
+def _ft8r_seeded_decode(audio: RealSamples, dt: float, freq: float) -> tuple[bool, str | None, float | None, float | None]:
+    """Attempt a full decode seeded by (dt,freq), bypassing candidate search.
+
+    Returns (ok, message, dt_refined, freq_refined). ok=True only if CRC passes.
+    """
+    try:
+        bb, dt_f, freq_f = fine_sync_candidate(audio, freq, dt)
+        llrs = soft_demod(bb)
+        bits_h = naive_hard_decode(llrs)
+        if check_crc(bits_h):
+            return True, decode77(bits_h[:77]), dt_f, freq_f
+        bits = ldpc_decode(llrs)
+        if check_crc(bits):
+            return True, decode77(bits[:77]), dt_f, freq_f
+    except Exception:
+        pass
+    return False, None, None, None
 if __name__ == "__main__":
     main()
