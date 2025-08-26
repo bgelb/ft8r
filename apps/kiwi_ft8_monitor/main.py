@@ -470,13 +470,6 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
         s_str = _fmt_s(s_val)
         g_str = _fmt_g(g_val)
         l_str = _fmt_l(l_val)
-        # Near-pruned indicator (nearest candidate by dt/freq within eps but below threshold)
-        np_str = ""
-        try:
-            if rec.get('ft8r_near_pruned'):
-                np_str = " N<thr"
-        except Exception:
-            np_str = ""
         # Seeded decode outcome
         seed_str = ""
         try:
@@ -486,7 +479,7 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
                 seed_str = " Seed=Fail"
         except Exception:
             seed_str = ""
-        mcol = f"{s_str} {g_str} {l_str}{np_str}{seed_str} "
+        mcol = f"{s_str} {g_str} {l_str}{seed_str} "
         # Color attribute if S<thr
         attr = 0
         try:
@@ -544,6 +537,12 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
             # Build left (ft8r metrics) and right (jt9, no metrics) strings
             if left_rec is not None:
                 left, left_attr = _fmt_line_ft8r(left_rec)
+                # Values used for mismatch highlighting
+                try:
+                    left_dt_val = float(left_rec.get('dt', 0.0))
+                    left_fq_val = float(left_rec.get('freq', 0.0))
+                except Exception:
+                    left_dt_val = 0.0; left_fq_val = 0.0
             else:
                 # For jt9-only gaps in ft8r column, synthesize a rec-like dict
                 # carrying our diagnostics extracted from jt9 decode
@@ -556,14 +555,30 @@ def render(stdscr, decodes: List[dict], metrics: Metrics, now_ts: float | None =
                     'ft8r_search_thr': right_rec.get('ft8r_search_thr') if right_rec else None,
                     'ft8r_gate': right_rec.get('ft8r_gate') if right_rec else None,
                     'ft8r_llr_avg': right_rec.get('ft8r_llr_avg') if right_rec else None,
-                    'ft8r_near_pruned': right_rec.get('ft8r_near_pruned') if right_rec else None,
                     'ft8r_seed_ok': right_rec.get('ft8r_seed_ok') if right_rec else None,
                 }
                 # Render with standard ft8r metrics ordering to align columns
                 s, attr = _fmt_line_ft8r(diag)
                 left = s
                 left_attr = attr
+                try:
+                    left_dt_val = float(diag.get('dt', 0.0))
+                    left_fq_val = float(diag.get('freq', 0.0))
+                except Exception:
+                    left_dt_val = 0.0; left_fq_val = 0.0
             right = _fmt_line_nometrics(right_rec) if right_rec is not None else ""
+            # Highlight mismatches vs JT9 in yellow when |df|>0.5 Hz or |dt|>0.05 s
+            try:
+                if right_rec is not None:
+                    dt_j = float(right_rec.get('dt', 0.0))
+                    fq_j = float(right_rec.get('freq', 0.0))
+                    if abs(left_dt_val - dt_j) > 0.05 or abs(left_fq_val - fq_j) > 0.5:
+                        try:
+                            left_attr = curses.color_pair(2)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             if row < h-1:
                 # Print left with potential color, then separator and right
                 left_print = left[:col_w].ljust(col_w)
@@ -607,7 +622,7 @@ def run_monitor_source(src_factory):
             curses.curs_set(0)
             stdscr.nodelay(True)
             try:
-                curses.start_color(); curses.use_default_colors(); curses.init_pair(1, curses.COLOR_RED, -1)
+                curses.start_color(); curses.use_default_colors(); curses.init_pair(1, curses.COLOR_RED, -1); curses.init_pair(2, curses.COLOR_YELLOW, -1)
             except Exception:
                 pass
             last_decodes: List[dict] = []
