@@ -1,3 +1,7 @@
+bench_outputs/
+.bench/
+.bench_cache/
+.tmp/
 .venv/
 .wsjtx/
 scripts/*.log
