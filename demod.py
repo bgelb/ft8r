@@ -494,6 +494,14 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
     precomputed_fft = _prepare_full_fft(samples_in)
     if _MAX_CANDIDATES > 0:
         candidates = candidates[:_MAX_CANDIDATES]
+
+    # Optional light microsearch: small df nudges on CRC failure
+    micro_enable = os.getenv("FT8R_MICRO_LIGHT_ENABLE", "0") not in ("0", "", "false", "False")
+    try:
+        micro_df_span = float(os.getenv("FT8R_MICRO_LIGHT_DF_SPAN", "1.0"))
+        micro_df_step = float(os.getenv("FT8R_MICRO_LIGHT_DF_STEP", "0.5"))
+    except Exception:
+        micro_df_span, micro_df_step = 1.0, 0.5
     for score, dt, freq in candidates:
         start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
         end = start + sym_len * FT8_SYMBOLS_PER_MESSAGE
@@ -521,7 +529,35 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
                 with PROFILER.section("ldpc.total"):
                     decoded_bits = ldpc_decode(llrs)
                 method = "ldpc"
-            # Enforce CRC gating after LDPC/hard decision
+            # If CRC still fails and microsearch is enabled, try small df offsets
+            if not (_ALLOW_CRC_FAIL or check_crc(decoded_bits)) and micro_enable:
+                dfs = np.arange(-micro_df_span, micro_df_span + 1e-9, micro_df_step)
+                for df in dfs:
+                    if abs(float(df)) < 1e-12:
+                        continue
+                    try:
+                        with PROFILER.section("align.pipeline_refined"):
+                            bb2, dt2, freq2 = fine_sync_candidate(
+                                samples_in, freq_f + float(df), dt_f, precomputed_fft=precomputed_fft
+                            )
+                        with PROFILER.section("demod.soft"):
+                            llrs2 = soft_demod(bb2)
+                        hard2 = naive_hard_decode(llrs2)
+                        if check_crc(hard2):
+                            decoded_bits = hard2
+                            method = "hard"
+                            bb, dt_f, freq_f, llrs = bb2, dt2, freq2, llrs2
+                            break
+                        with PROFILER.section("ldpc.total"):
+                            dec2 = ldpc_decode(llrs2)
+                        if check_crc(dec2):
+                            decoded_bits = dec2
+                            method = "ldpc"
+                            bb, dt_f, freq_f, llrs = bb2, dt2, freq2, llrs2
+                            break
+                    except Exception:
+                        continue
+            # Enforce CRC gating after LDPC/hard decision (after optional microsearch)
             if _ALLOW_CRC_FAIL or check_crc(decoded_bits):
                 text = decode77(decoded_bits[:77])
                 rec = {

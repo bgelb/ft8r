@@ -2,6 +2,16 @@
 
 This repository explores building an FT8 demodulator. The test suite can run fully self-contained using a local WSJT-X binary distribution and a Python virtual environment — no system-wide installation required.
 
+Optional runtime features (env toggles):
+- Coarse whitening (improves contrast in busy bands)
+  - `FT8R_WHITEN_ENABLE=1` to enable
+  - `FT8R_WHITEN_MODE=global|tile` (default `global`); `tile` uses robust per‑tile scaling (median + α·MAD)
+- Coarse candidate selection
+  - `FT8R_COARSE_MODE=peak|budget` (default `peak`); `budget` distributes picks per tile up to `FT8R_MAX_CANDIDATES`
+- Light microsearch (single‑pass; small frequency nudges on CRC failure)
+  - `FT8R_MICRO_LIGHT_ENABLE=1` to enable
+  - `FT8R_MICRO_LIGHT_DF_SPAN` (default `1.0` Hz), `FT8R_MICRO_LIGHT_DF_STEP` (default `0.5` Hz)
+
 ### Quick start
 
 One command to fully prepare the environment (WSJT-X, Python venv, sample dataset) and optionally run tests:

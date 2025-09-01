@@ -151,6 +151,42 @@ def candidate_score_map(
     with PROFILER.section("search.fft_power"):
         fft_pwr = np.abs(ffts) ** 2
 
+    # Optional local whitening/normalization to improve contrast in busy bands.
+    if os.getenv("FT8R_WHITEN_ENABLE", "0") not in ("0", "", "false", "False"):
+        eps = float(os.getenv("FT8R_WHITEN_EPS", "1e-12"))
+        mode = os.getenv("FT8R_WHITEN_MODE", "global").strip().lower()
+        if mode == "tile":
+            # Tile-based robust scaling: divide by (median + alpha*MAD) per tile.
+            alpha = float(os.getenv("FT8R_WHITEN_MAD_ALPHA", "3.0"))
+            # Derive reasonable defaults for tile sizes if not specified.
+            # Time tile default: ~0.5s worth of rows.
+            rows_per_sec = sample_rate / (sym_len // TIME_SEARCH_OVERSAMPLING_RATIO)
+            default_dt_rows = max(1, int(round(0.5 * rows_per_sec)))
+            default_df_bins = max(1, int(round(100.0 / TONE_SPACING_IN_HZ)))  # ~100 Hz
+            tile_dt = int(os.getenv("FT8R_WHITEN_TILE_DT", str(default_dt_rows)))
+            tile_df = int(os.getenv("FT8R_WHITEN_TILE_FREQ", str(default_df_bins)))
+            H, W = fft_pwr.shape
+            with PROFILER.section("search.whiten.tile"):
+                for i0 in range(0, H, tile_dt):
+                    i1 = min(i0 + tile_dt, H)
+                    blk = fft_pwr[i0:i1]
+                    for j0 in range(0, W, tile_df):
+                        j1 = min(j0 + tile_df, W)
+                        sub = blk[:, j0:j1]
+                        med = np.median(sub)
+                        mad = np.median(np.abs(sub - med))
+                        scale = med + alpha * mad + eps
+                        fft_pwr[i0:i1, j0:j1] = sub / scale
+        else:
+            with PROFILER.section("search.whiten.freq"):
+                col_med = np.median(fft_pwr, axis=0)
+                col_med = np.maximum(col_med, eps)
+                fft_pwr = fft_pwr / col_med
+            with PROFILER.section("search.whiten.time"):
+                row_med = np.median(fft_pwr, axis=1, keepdims=True)
+                row_med = np.maximum(row_med, eps)
+                fft_pwr = fft_pwr / row_med
+
     # Vectorized Costas correlation: sum target tone bins vs non-target bins
     with PROFILER.section("search.correlate"):
         active_map, noise_map = _costas_active_noise_maps(fft_pwr)
@@ -187,6 +223,9 @@ def candidate_score_map(
     return scores, dts, freqs
 
 
+import os
+
+
 def peak_candidates(
     scores: np.ndarray,
     dts: np.ndarray,
@@ -211,6 +250,102 @@ def peak_candidates(
         (float(scores[i, j]), float(dts[i]), float(freqs[j]))
         for i, j in zip(dt_idx, freq_idx)
     ]
+    results.sort(reverse=True)
+    return results
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+## Removed experimental tile_topk in favor of budgeted per-tile selection.
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+## Removed experimental adaptive replacement path in favor of budgeted selection.
+
+
+def budget_tile_candidates(
+    scores: np.ndarray,
+    dts: np.ndarray,
+    freqs: np.ndarray,
+    base_threshold: float,
+    *,
+    budget: int,
+) -> List[Tuple[float, float, float]]:
+    """Adaptive per-tile thresholding to a global budget.
+
+    Lowers per-tile thresholds together from a high quantile to a lower bound,
+    adding up to K per tile, until reaching the global candidate budget.
+    """
+    h, w = scores.shape
+    td = max(1, _env_int("FT8R_COARSE_ADAPTIVE_TILE_DT", 8))
+    tf = max(1, _env_int("FT8R_COARSE_ADAPTIVE_TILE_FREQ", 4))
+    k = max(1, _env_int("FT8R_COARSE_ADAPTIVE_PER_TILE_K", 2))
+    t_min = _env_float("FT8R_COARSE_ADAPTIVE_THRESH_MIN", 0.7)
+    q_start = _env_float("FT8R_COARSE_ADAPTIVE_Q_START", 0.98)
+    q_min = _env_float("FT8R_COARSE_ADAPTIVE_Q_MIN", 0.80)
+    q_step = _env_float("FT8R_COARSE_ADAPTIVE_Q_STEP", 0.05)
+
+    # Prepare sorted indices per tile
+    tiles = []
+    for i0 in range(0, h, td):
+        i1 = min(i0 + td, h)
+        for j0 in range(0, w, tf):
+            j1 = min(j0 + tf, w)
+            block = scores[i0:i1, j0:j1]
+            if block.size == 0:
+                continue
+            flat_scores = block.ravel()
+            order = np.argsort(flat_scores)[::-1]
+            tiles.append((i0, i1, j0, j1, block, flat_scores, order))
+
+    selected_mask = np.zeros_like(scores, dtype=bool)
+    results: List[Tuple[float, float, float]] = []
+    selected_per_tile = [0] * len(tiles)
+
+    q = q_start
+    while q >= q_min and len(results) < budget:
+        for idx, (i0, i1, j0, j1, block, flat_scores, order) in enumerate(tiles):
+            if selected_per_tile[idx] >= k or len(results) >= budget:
+                continue
+            # Compute tile threshold at current quantile
+            q_th = float(np.quantile(block, q))
+            T_tile = max(base_threshold, q_th, t_min)
+            # Try to add highest-scoring points above T_tile
+            for fid in order:
+                if selected_per_tile[idx] >= k or len(results) >= budget:
+                    break
+                s = float(flat_scores[fid])
+                if s < T_tile:
+                    break
+                di = fid // (j1 - j0)
+                dj = fid % (j1 - j0)
+                i = i0 + di
+                j = j0 + dj
+                if selected_mask[i, j]:
+                    continue
+                # Enforce small 3x3 separation globally
+                ii0 = max(0, i - 1)
+                ii1 = min(h, i + 2)
+                jj0 = max(0, j - 1)
+                jj1 = min(w, j + 2)
+                if selected_mask[ii0:ii1, jj0:jj1].any():
+                    continue
+                selected_mask[i, j] = True
+                results.append((s, float(dts[i]), float(freqs[j])))
+                selected_per_tile[idx] += 1
+        q -= q_step
+
     results.sort(reverse=True)
     return results
 
@@ -257,4 +392,12 @@ def find_candidates(
         max_dt_in_symbols,
     )
 
+    mode = os.getenv("FT8R_COARSE_MODE", "peak").strip().lower()
+    if mode == "budget":
+        # Target a global budget. Fall back to peak if budget invalid.
+        try:
+            B = int(os.getenv("FT8R_MAX_CANDIDATES", "1500"))
+        except Exception:
+            B = 1500
+        return budget_tile_candidates(scores, dts, freqs, threshold, budget=B if B > 0 else 1500)
     return peak_candidates(scores, dts, freqs, threshold)
