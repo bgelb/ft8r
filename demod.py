@@ -524,19 +524,19 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
             mu0 = float(np.mean(np.abs(llrs)))
             if _MIN_LLR_AVG > 0.0 and mu0 < _MIN_LLR_AVG:
                 raise RuntimeError("low_llr")
-            # Try hard-decision CRC first to avoid expensive LDPC when possible
+            # Try hard-decision CRC first
             hard_bits = naive_hard_decode(llrs)
             method = "hard"
             if check_crc(hard_bits):
                 decoded_bits = hard_bits
             else:
-                # Defer LDPC until after optional microsearch; evaluate hard-only across df
+                # Move microsearch before any LDPC: scan df nudges hard-only to
+                # find a nearby alignment with stronger LLRs; if none pass hard
+                # CRC, run a single LDPC on the best-μ candidate.
                 best = (mu0, 0.0, bb, dt_f, freq_f, llrs)
                 hard_passed = False
                 if micro_enable:
                     dfs = np.arange(-micro_df_span, micro_df_span + 1e-9, micro_df_step)
-                    # Apply small frequency nudges by phase-rotating the existing baseband window
-                    # to avoid re-running the full alignment for each trial.
                     samples = bb.samples
                     sr = bb.sample_rate_in_hz
                     t_idx = np.arange(samples.shape[0]) / sr
