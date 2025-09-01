@@ -271,86 +271,33 @@ def fine_time_sync(samples: ComplexSamples, dt: float, search: int) -> float:
 def fine_freq_sync(
     samples: ComplexSamples, dt: float, search_hz: float, step_hz: float
 ) -> float:
-    """Return frequency offset optimizing a selected metric with sub-bin refinement.
-
-    Metric is controlled by `FT8R_FINE_FREQ_METRIC`: 'costas' (default), 'llr', or
-    'hybrid'. The 'hybrid' mode selects the Costas peak then refines within a small
-    window using mean |LLR| over payload symbols to pick the final bin.
-    """
+    """Return frequency offset maximizing Costas energy with sub-bin refinement."""
 
     sample_rate = samples.sample_rate_in_hz
     start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
     freqs = np.arange(-search_hz, search_hz + step_hz / 2, step_hz)
     sym_len = _symbol_samples(sample_rate)
     time_idx = np.arange(sym_len) / sample_rate
-    bases0 = _zero_offset_bases(sample_rate, sym_len)  # (8, sym_len)
+    bases0 = _zero_offset_bases(sample_rate, sym_len)
 
-    # Build symbol matrix for the candidate window once.
-    seg = _symbol_matrix(samples.samples, start, sym_len)  # (79, sym_len)
+    seg = _symbol_matrix(samples.samples, start, sym_len)
 
-    metric = os.getenv("FT8R_FINE_FREQ_METRIC", "hybrid").strip().lower()
     with PROFILER.section("align.costas_energy_freq"):
-        # Stack phase shifts for all freqs: (F, sym_len)
         shifts = np.exp(-2j * np.pi * freqs[:, None] * time_idx[None, :])
-        # Apply to tone bases to get (F, 8, sym_len)
         bases = bases0[None, :, :] * shifts[:, None, :]
-        # Batched matmul: (F, 8, sym_len) @ (sym_len, 79) -> (F, 8, 79)
-        amp = np.abs(bases @ seg.T)
-        # Costas energy for all freqs
+        resp = np.abs(bases @ seg.T) ** 2
         pos_idx = np.array(COSTAS_POSITIONS)
         tone_idx = np.array(COSTAS_SEQUENCE * 3)
-        costas_energy = (amp[:, tone_idx, pos_idx] ** 2).sum(axis=1)  # (F,)
+        energies = resp[:, tone_idx, pos_idx].sum(axis=1)
 
-    # Choose best according to metric
-    if metric == "llr":
-        # Compute LLR metric for all freqs
-        payload_mask = np.ones(FT8_SYMBOLS_PER_MESSAGE, dtype=bool)
-        payload_mask[pos_idx] = False
-        payload_idx = np.nonzero(payload_mask)[0]
-        probs = amp[:, :, payload_idx]
-        probs = probs / (probs.sum(axis=1, keepdims=True) + 1e-12)
-        gray_bits = np.array(
-            [[(g >> (2 - b)) & 1 for g in GRAY_MAP] for b in range(3)], dtype=bool
-        )  # (3,8)
-        mask = gray_bits[None, :, :, None]  # (1,3,8,1)
-        ones = np.where(mask, probs[:, None, :, :], 0.0).sum(axis=2)
-        zeros = np.where(~mask, probs[:, None, :, :], 0.0).sum(axis=2)
-        llrs = np.log(ones + 1e-12) - np.log(zeros + 1e-12)  # (F,3,72)
-        mu_llr = np.mean(np.abs(llrs), axis=(1, 2))  # (F,)
-        best = int(np.argmax(mu_llr))  # type: ignore[arg-type]
-        frac = 0.0
-    elif metric == "hybrid":
-        best_costas = int(np.argmax(costas_energy))
-        # small refinement window around costas peak
-        win = int(float(os.getenv("FT8R_FINE_FREQ_LLR_WINDOW", "4")))
-        j0 = max(0, best_costas - win)
-        j1 = min(len(freqs) - 1, best_costas + win)
-        # Compute LLR metric only within refinement window
-        payload_mask = np.ones(FT8_SYMBOLS_PER_MESSAGE, dtype=bool)
-        payload_mask[pos_idx] = False
-        payload_idx = np.nonzero(payload_mask)[0]
-        probs_w = amp[j0 : j1 + 1, :, payload_idx]
-        probs_w = probs_w / (probs_w.sum(axis=1, keepdims=True) + 1e-12)
-        gray_bits = np.array(
-            [[(g >> (2 - b)) & 1 for g in GRAY_MAP] for b in range(3)], dtype=bool
-        )  # (3,8)
-        mask = gray_bits[None, :, :, None]
-        ones = np.where(mask, probs_w[:, None, :, :], 0.0).sum(axis=2)
-        zeros = np.where(~mask, probs_w[:, None, :, :], 0.0).sum(axis=2)
-        llrs_w = np.log(ones + 1e-12) - np.log(zeros + 1e-12)
-        mu_llr_w = np.mean(np.abs(llrs_w), axis=(1, 2))
-        best = int(j0 + int(np.argmax(mu_llr_w)))
-        frac = 0.0
-    else:
-        best = int(np.argmax(costas_energy))
-        # Sub-bin refinement via parabolic interpolation around the Costas peak.
-        frac = 0.0
-        if 0 < best < len(costas_energy) - 1:
-            y1, y2, y3 = costas_energy[best - 1], costas_energy[best], costas_energy[best + 1]
-            denom = (y1 - 2.0 * y2 + y3)
-            if abs(denom) > 1e-18:
-                frac = 0.5 * (y1 - y3) / denom
-                frac = float(np.clip(frac, -0.5, 0.5))
+    best = int(np.argmax(energies))
+    frac = 0.0
+    if 0 < best < len(energies) - 1:
+        y1, y2, y3 = energies[best - 1], energies[best], energies[best + 1]
+        denom = (y1 - 2.0 * y2 + y3)
+        if abs(denom) > 1e-18:
+            frac = 0.5 * (y1 - y3) / denom
+            frac = float(np.clip(frac, -0.5, 0.5))
 
     return float(freqs[best] + frac * step_hz)
 
@@ -565,10 +512,48 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
             if check_crc(hard_bits):
                 decoded_bits = hard_bits
             else:
-                # Single LDPC on the aligned snapshot
-                with PROFILER.section("ldpc.total"):
-                    decoded_bits = ldpc_decode(llrs)
-                method = "ldpc"
+                # Light df microsearch before LDPC: try hard-only small df nudges
+                try:
+                    micro_df_span = float(os.getenv("FT8R_MICRO_LIGHT_DF_SPAN", "1.0"))
+                    micro_df_step = float(os.getenv("FT8R_MICRO_LIGHT_DF_STEP", "0.5"))
+                except Exception:
+                    micro_df_span, micro_df_step = 1.0, 0.5
+                best_mu = mu0
+                best_tuple = (bb, dt_f, freq_f, llrs)
+                samples = bb.samples
+                sr = bb.sample_rate_in_hz
+                t_idx = np.arange(samples.shape[0]) / sr
+                dfs = np.arange(-micro_df_span, micro_df_span + 1e-9, micro_df_step)
+                hard_passed = False
+                for df in dfs:
+                    if abs(float(df)) < 1e-12:
+                        continue
+                    with PROFILER.section("align.freq_nudge"):
+                        rot = np.exp(-2j * np.pi * float(df) * t_idx)
+                        nudged = samples * rot
+                        bb2 = ComplexSamples(nudged, sr)
+                        dt2, freq2 = dt_f, freq_f + float(df)
+                    with PROFILER.section("demod.soft"):
+                        llrs2 = soft_demod(bb2)
+                    mu2 = float(np.mean(np.abs(llrs2)))
+                    if _MIN_LLR_AVG > 0.0 and mu2 < _MIN_LLR_AVG:
+                        continue
+                    hard2 = naive_hard_decode(llrs2)
+                    if check_crc(hard2):
+                        decoded_bits = hard2
+                        method = "hard"
+                        bb, dt_f, freq_f, llrs = bb2, dt2, freq2, llrs2
+                        hard_passed = True
+                        break
+                    if mu2 > best_mu:
+                        best_mu = mu2
+                        best_tuple = (bb2, dt2, freq2, llrs2)
+                if not hard_passed:
+                    bb_b, dt_b, freq_b, llrs_b = best_tuple
+                    with PROFILER.section("ldpc.total"):
+                        decoded_bits = ldpc_decode(llrs_b)
+                    method = "ldpc"
+                    bb, dt_f, freq_f, llrs = bb_b, dt_b, freq_b, llrs_b
             # Enforce CRC gating after LDPC/hard decision (after optional microsearch)
             if _ALLOW_CRC_FAIL or check_crc(decoded_bits):
                 text = decode77(decoded_bits[:77])
