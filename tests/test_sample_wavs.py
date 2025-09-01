@@ -12,8 +12,8 @@ from tests.utils import DEFAULT_DT_EPS, DEFAULT_FREQ_EPS, ft8code_bits, resolve_
 DATA_DIR = Path(__file__).resolve().parent.parent / "ft8_lib-2.0" / "test" / "wav"
 
 # Minimum aggregate decode ratio required to pass across the full library
-# Raised to capture gains from whitening + budgeted selection + light microsearch
-FULL_MIN_RATIO = 0.80
+# Raised to reflect current gains while preserving small headroom
+FULL_MIN_RATIO = 0.87
 # Maximum false decode rate threshold (after deduping by payload)
 FULL_MAX_FALSE_OVERLAP_RATIO = 0.25
 
