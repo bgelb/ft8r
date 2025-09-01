@@ -71,7 +71,9 @@ _EDGE_TAPER = 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, _EDGE_TAPER_LEN))
 
 # Optional early rejection threshold based on average |LLR|.
 try:
-    _MIN_LLR_AVG = float(os.getenv("FT8R_MIN_LLR_AVG", "0"))
+    # Skip LDPC (and optionally whole candidate) when average |LLR| is very low.
+    # Can be overridden via FT8R_MIN_LLR_AVG.
+    _MIN_LLR_AVG = float(os.getenv("FT8R_MIN_LLR_AVG", "0.2"))
 except Exception:
     _MIN_LLR_AVG = 0.0
 _ENV_MAX = os.getenv("FT8R_MAX_CANDIDATES", "").strip()
@@ -269,36 +271,26 @@ def fine_time_sync(samples: ComplexSamples, dt: float, search: int) -> float:
 def fine_freq_sync(
     samples: ComplexSamples, dt: float, search_hz: float, step_hz: float
 ) -> float:
-    """Return frequency offset maximizing Costas energy with sub-bin refinement.
-
-    Vectorized across the candidate frequency grid for performance.
-    """
+    """Return frequency offset maximizing Costas energy with sub-bin refinement."""
 
     sample_rate = samples.sample_rate_in_hz
     start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
     freqs = np.arange(-search_hz, search_hz + step_hz / 2, step_hz)
     sym_len = _symbol_samples(sample_rate)
     time_idx = np.arange(sym_len) / sample_rate
-    bases0 = _zero_offset_bases(sample_rate, sym_len)  # (8, sym_len)
+    bases0 = _zero_offset_bases(sample_rate, sym_len)
 
-    # Build symbol matrix for the candidate window once.
-    seg = _symbol_matrix(samples.samples, start, sym_len)  # (79, sym_len)
+    seg = _symbol_matrix(samples.samples, start, sym_len)
 
     with PROFILER.section("align.costas_energy_freq"):
-        # Stack phase shifts for all freqs: (F, sym_len)
         shifts = np.exp(-2j * np.pi * freqs[:, None] * time_idx[None, :])
-        # Apply to tone bases to get (F, 8, sym_len)
         bases = bases0[None, :, :] * shifts[:, None, :]
-        # Batched matmul: (F, 8, sym_len) @ (sym_len, 79) -> (F, 8, 79)
         resp = np.abs(bases @ seg.T) ** 2
-        # Select Costas tone/symbol positions and sum
         pos_idx = np.array(COSTAS_POSITIONS)
         tone_idx = np.array(COSTAS_SEQUENCE * 3)
-        energies = resp[:, tone_idx, pos_idx].sum(axis=1)  # (F,)
+        energies = resp[:, tone_idx, pos_idx].sum(axis=1)
 
     best = int(np.argmax(energies))
-
-    # Sub-bin refinement via parabolic interpolation around the peak.
     frac = 0.0
     if 0 < best < len(energies) - 1:
         y1, y2, y3 = energies[best - 1], energies[best], energies[best + 1]
@@ -494,6 +486,7 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
     precomputed_fft = _prepare_full_fft(samples_in)
     if _MAX_CANDIDATES > 0:
         candidates = candidates[:_MAX_CANDIDATES]
+
     for score, dt, freq in candidates:
         start = int(round((dt + COSTAS_START_OFFSET_SEC) * sample_rate))
         end = start + sym_len * FT8_SYMBOLS_PER_MESSAGE
@@ -510,18 +503,58 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
             with PROFILER.section("demod.soft"):
                 llrs = soft_demod(bb)
             # Optional quick rejection by average |LLR|
-            if _MIN_LLR_AVG > 0.0 and float(np.mean(np.abs(llrs))) < _MIN_LLR_AVG:
+            mu0 = float(np.mean(np.abs(llrs)))
+            if _MIN_LLR_AVG > 0.0 and mu0 < _MIN_LLR_AVG:
                 raise RuntimeError("low_llr")
-            # Try hard-decision CRC first to avoid expensive LDPC when possible
+            # Try hard-decision CRC first
             hard_bits = naive_hard_decode(llrs)
             method = "hard"
             if check_crc(hard_bits):
                 decoded_bits = hard_bits
             else:
-                with PROFILER.section("ldpc.total"):
-                    decoded_bits = ldpc_decode(llrs)
-                method = "ldpc"
-            # Enforce CRC gating after LDPC/hard decision
+                # Light df microsearch before LDPC: try hard-only small df nudges
+                try:
+                    micro_df_span = float(os.getenv("FT8R_MICRO_LIGHT_DF_SPAN", "1.0"))
+                    micro_df_step = float(os.getenv("FT8R_MICRO_LIGHT_DF_STEP", "0.5"))
+                except Exception:
+                    micro_df_span, micro_df_step = 1.0, 0.5
+                best_mu = mu0
+                best_tuple = (bb, dt_f, freq_f, llrs)
+                samples = bb.samples
+                sr = bb.sample_rate_in_hz
+                t_idx = np.arange(samples.shape[0]) / sr
+                dfs = np.arange(-micro_df_span, micro_df_span + 1e-9, micro_df_step)
+                hard_passed = False
+                for df in dfs:
+                    if abs(float(df)) < 1e-12:
+                        continue
+                    with PROFILER.section("align.freq_nudge"):
+                        rot = np.exp(-2j * np.pi * float(df) * t_idx)
+                        nudged = samples * rot
+                        bb2 = ComplexSamples(nudged, sr)
+                        dt2, freq2 = dt_f, freq_f + float(df)
+                    with PROFILER.section("demod.soft"):
+                        llrs2 = soft_demod(bb2)
+                    mu2 = float(np.mean(np.abs(llrs2)))
+                    if _MIN_LLR_AVG > 0.0 and mu2 < _MIN_LLR_AVG:
+                        continue
+                    hard2 = naive_hard_decode(llrs2)
+                    if check_crc(hard2):
+                        decoded_bits = hard2
+                        method = "hard"
+                        bb, dt_f, freq_f, llrs = bb2, dt2, freq2, llrs2
+                        hard_passed = True
+                        break
+                    if mu2 > best_mu:
+                        best_mu = mu2
+                        best_tuple = (bb2, dt2, freq2, llrs2)
+                if not hard_passed:
+                    bb_b, dt_b, freq_b, llrs_b = best_tuple
+                    with PROFILER.section("ldpc.total"):
+                        decoded_bits = ldpc_decode(llrs_b)
+                    method = "ldpc"
+                    bb, dt_f, freq_f, llrs = bb_b, dt_b, freq_b, llrs_b
+            # Enforce CRC gating after LDPC/hard decision (after optional microsearch)
             if _ALLOW_CRC_FAIL or check_crc(decoded_bits):
                 text = decode77(decoded_bits[:77])
                 rec = {
