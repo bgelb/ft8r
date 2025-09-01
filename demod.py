@@ -486,7 +486,10 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
 
     with PROFILER.section("search.find_candidates"):
         candidates = find_candidates(
-            samples_in, max_freq_bin, max_dt_symbols, threshold=threshold
+            samples_in,
+            max_freq_bin,
+            max_dt_symbols,
+            threshold=threshold,
         )
 
     results = []
