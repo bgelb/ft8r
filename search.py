@@ -152,9 +152,11 @@ def candidate_score_map(
         fft_pwr = np.abs(ffts) ** 2
 
     # Optional local whitening/normalization to improve contrast in busy bands.
-    if os.getenv("FT8R_WHITEN_ENABLE", "0") not in ("0", "", "false", "False"):
+    # Default: enabled (set FT8R_WHITEN_ENABLE=0 to disable)
+    if os.getenv("FT8R_WHITEN_ENABLE", "1") not in ("0", "", "false", "False"):
         eps = float(os.getenv("FT8R_WHITEN_EPS", "1e-12"))
-        mode = os.getenv("FT8R_WHITEN_MODE", "global").strip().lower()
+        # Default to robust tile mode
+        mode = os.getenv("FT8R_WHITEN_MODE", "tile").strip().lower()
         if mode == "tile":
             # Tile-based robust scaling: divide by (median + alpha*MAD) per tile.
             alpha = float(os.getenv("FT8R_WHITEN_MAD_ALPHA", "3.0"))
@@ -392,7 +394,8 @@ def find_candidates(
         max_dt_in_symbols,
     )
 
-    mode = os.getenv("FT8R_COARSE_MODE", "peak").strip().lower()
+    # Default to budgeted per-tile selection; set FT8R_COARSE_MODE=peak to revert
+    mode = os.getenv("FT8R_COARSE_MODE", "budget").strip().lower()
     if mode == "budget":
         # Target a global budget. Fall back to peak if budget invalid.
         try:

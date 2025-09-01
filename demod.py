@@ -496,7 +496,8 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
         candidates = candidates[:_MAX_CANDIDATES]
 
     # Optional light microsearch: small df nudges on CRC failure
-    micro_enable = os.getenv("FT8R_MICRO_LIGHT_ENABLE", "0") not in ("0", "", "false", "False")
+    # Default: enable light microsearch; set FT8R_MICRO_LIGHT_ENABLE=0 to disable
+    micro_enable = os.getenv("FT8R_MICRO_LIGHT_ENABLE", "1") not in ("0", "", "false", "False")
     try:
         micro_df_span = float(os.getenv("FT8R_MICRO_LIGHT_DF_SPAN", "1.0"))
         micro_df_step = float(os.getenv("FT8R_MICRO_LIGHT_DF_STEP", "0.5"))
