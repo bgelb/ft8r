@@ -152,10 +152,10 @@ def candidate_score_map(
         fft_pwr = np.abs(ffts) ** 2
 
     # Optional local whitening/normalization to improve contrast in busy bands.
-    # Default: enabled (set FT8R_WHITEN_ENABLE=0 to disable)
+    # Enable via FT8R_WHITEN_ENABLE (1 to enable)
     if os.getenv("FT8R_WHITEN_ENABLE", "1") not in ("0", "", "false", "False"):
         eps = float(os.getenv("FT8R_WHITEN_EPS", "1e-12"))
-        # Default to robust tile mode
+        # Mode: 'tile' or 'global' via FT8R_WHITEN_MODE
         mode = os.getenv("FT8R_WHITEN_MODE", "tile").strip().lower()
         if mode == "tile":
             # Tile-based robust scaling: divide by (median + alpha*MAD) per tile.
@@ -263,7 +263,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-## Removed experimental tile_topk in favor of budgeted per-tile selection.
+ 
 
 
 def _env_float(name: str, default: float) -> float:
@@ -273,7 +273,7 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-## Removed experimental adaptive replacement path in favor of budgeted selection.
+ 
 
 
 def budget_tile_candidates(
@@ -394,7 +394,7 @@ def find_candidates(
         max_dt_in_symbols,
     )
 
-    # Default to budgeted per-tile selection; set FT8R_COARSE_MODE=peak to revert
+    # Selection mode via FT8R_COARSE_MODE ('budget' or 'peak')
     mode = os.getenv("FT8R_COARSE_MODE", "budget").strip().lower()
     if mode == "budget":
         # Target a global budget. Fall back to peak if budget invalid.
