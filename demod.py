@@ -557,12 +557,15 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
             # Enforce CRC gating after LDPC/hard decision (after optional microsearch)
             if _ALLOW_CRC_FAIL or check_crc(decoded_bits):
                 text = decode77(decoded_bits[:77])
+                # Compute mean |LLR| for dedup/quality ranking
+                mu = float(np.mean(np.abs(llrs))) if isinstance(llrs, np.ndarray) else 0.0
                 rec = {
                     "message": text,
                     "score": score,
                     "freq": freq_f,
                     "dt": dt_f,
                     "method": method,
+                    "mu": mu,
                 }
                 if include_bits:
                     rec["bits"] = decoded_bits
@@ -573,4 +576,44 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
 
         # Legacy alignment removed
 
+    # Post-process: deduplicate repeated decodes of the same text that are
+    # spatially overlapping (within 1 symbol period in time and 1 tone bin in
+    # frequency). Keep the best candidate by mean |LLR|, preferring hard-CRC
+    # decodes.
+
+    def _dedup_by_text(recs: list[dict]) -> list[dict]:
+        if not recs:
+            return recs
+        dt_eps = FT8_SYMBOL_LENGTH_IN_SEC
+        df_eps = TONE_SPACING_IN_HZ
+        # Group by decoded text
+        by_text: dict[str, list[dict]] = {}
+        for r in recs:
+            by_text.setdefault(r.get("message", ""), []).append(r)
+        kept: list[dict] = []
+        for txt, group in by_text.items():
+            # Sort by method priority (hard first) then by mu descending, then score
+            def _key(r: dict):
+                # hard -> 0, others -> 1 so hard first
+                meth = 0 if r.get("method") == "hard" else 1
+                return (meth, -(float(r.get("mu", 0.0)) or 0.0), -float(r.get("score", 0.0)))
+
+            group_sorted = sorted(group, key=_key)
+            chosen: list[dict] = []
+            for cand in group_sorted:
+                # accept if no previously chosen overlaps within eps
+                overlap = False
+                for k in chosen:
+                    if (
+                        abs(float(cand.get("dt", 0.0)) - float(k.get("dt", 0.0))) < dt_eps
+                        and abs(float(cand.get("freq", 0.0)) - float(k.get("freq", 0.0))) < df_eps
+                    ):
+                        overlap = True
+                        break
+                if not overlap:
+                    chosen.append(cand)
+            kept.extend(chosen)
+        return kept
+
+    results = _dedup_by_text(results)
     return results
