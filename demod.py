@@ -71,7 +71,9 @@ _EDGE_TAPER = 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, _EDGE_TAPER_LEN))
 
 # Optional early rejection threshold based on average |LLR|.
 try:
-    _MIN_LLR_AVG = float(os.getenv("FT8R_MIN_LLR_AVG", "0"))
+    # Skip LDPC (and optionally whole candidate) when average |LLR| is very low.
+    # Can be overridden via FT8R_MIN_LLR_AVG.
+    _MIN_LLR_AVG = float(os.getenv("FT8R_MIN_LLR_AVG", "0.2"))
 except Exception:
     _MIN_LLR_AVG = 0.0
 _ENV_MAX = os.getenv("FT8R_MAX_CANDIDATES", "").strip()
@@ -519,7 +521,8 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
             with PROFILER.section("demod.soft"):
                 llrs = soft_demod(bb)
             # Optional quick rejection by average |LLR|
-            if _MIN_LLR_AVG > 0.0 and float(np.mean(np.abs(llrs))) < _MIN_LLR_AVG:
+            mu0 = float(np.mean(np.abs(llrs)))
+            if _MIN_LLR_AVG > 0.0 and mu0 < _MIN_LLR_AVG:
                 raise RuntimeError("low_llr")
             # Try hard-decision CRC first to avoid expensive LDPC when possible
             hard_bits = naive_hard_decode(llrs)
@@ -527,37 +530,48 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
             if check_crc(hard_bits):
                 decoded_bits = hard_bits
             else:
-                with PROFILER.section("ldpc.total"):
-                    decoded_bits = ldpc_decode(llrs)
-                method = "ldpc"
-            # If CRC still fails and microsearch is enabled, try small df offsets
-            if not (_ALLOW_CRC_FAIL or check_crc(decoded_bits)) and micro_enable:
-                dfs = np.arange(-micro_df_span, micro_df_span + 1e-9, micro_df_step)
-                for df in dfs:
-                    if abs(float(df)) < 1e-12:
-                        continue
-                    try:
-                        with PROFILER.section("align.pipeline_refined"):
-                            bb2, dt2, freq2 = fine_sync_candidate(
-                                samples_in, freq_f + float(df), dt_f, precomputed_fft=precomputed_fft
-                            )
-                        with PROFILER.section("demod.soft"):
-                            llrs2 = soft_demod(bb2)
-                        hard2 = naive_hard_decode(llrs2)
-                        if check_crc(hard2):
-                            decoded_bits = hard2
-                            method = "hard"
-                            bb, dt_f, freq_f, llrs = bb2, dt2, freq2, llrs2
-                            break
-                        with PROFILER.section("ldpc.total"):
-                            dec2 = ldpc_decode(llrs2)
-                        if check_crc(dec2):
-                            decoded_bits = dec2
-                            method = "ldpc"
-                            bb, dt_f, freq_f, llrs = bb2, dt2, freq2, llrs2
-                            break
-                    except Exception:
-                        continue
+                # Defer LDPC until after optional microsearch; evaluate hard-only across df
+                best = (mu0, 0.0, bb, dt_f, freq_f, llrs)
+                hard_passed = False
+                if micro_enable:
+                    dfs = np.arange(-micro_df_span, micro_df_span + 1e-9, micro_df_step)
+                    # Apply small frequency nudges by phase-rotating the existing baseband window
+                    # to avoid re-running the full alignment for each trial.
+                    samples = bb.samples
+                    sr = bb.sample_rate_in_hz
+                    t_idx = np.arange(samples.shape[0]) / sr
+                    for df in dfs:
+                        if abs(float(df)) < 1e-12:
+                            continue
+                        try:
+                            with PROFILER.section("align.freq_nudge"):
+                                rot = np.exp(-2j * np.pi * float(df) * t_idx)
+                                nudged = samples * rot
+                                bb2 = ComplexSamples(nudged, sr)
+                                dt2, freq2 = dt_f, freq_f + float(df)
+                            with PROFILER.section("demod.soft"):
+                                llrs2 = soft_demod(bb2)
+                            mu2 = float(np.mean(np.abs(llrs2)))
+                            if _MIN_LLR_AVG > 0.0 and mu2 < _MIN_LLR_AVG:
+                                continue
+                            hard2 = naive_hard_decode(llrs2)
+                            if check_crc(hard2):
+                                decoded_bits = hard2
+                                method = "hard"
+                                bb, dt_f, freq_f, llrs = bb2, dt2, freq2, llrs2
+                                hard_passed = True
+                                break
+                            if mu2 > best[0]:
+                                best = (mu2, float(df), bb2, dt2, freq2, llrs2)
+                        except Exception:
+                            continue
+                if not hard_passed:
+                    # Run LDPC once on the best-μ candidate (may be original)
+                    _, _, bb_b, dt_b, freq_b, llrs_b = best
+                    with PROFILER.section("ldpc.total"):
+                        decoded_bits = ldpc_decode(llrs_b)
+                    method = "ldpc"
+                    bb, dt_f, freq_f, llrs = bb_b, dt_b, freq_b, llrs_b
             # Enforce CRC gating after LDPC/hard decision (after optional microsearch)
             if _ALLOW_CRC_FAIL or check_crc(decoded_bits):
                 text = decode77(decoded_bits[:77])

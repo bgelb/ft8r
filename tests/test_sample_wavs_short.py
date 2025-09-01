@@ -12,8 +12,8 @@ from tests.test_sample_wavs import (
 
 
 # Minimum aggregate decode ratio required to pass for the short regression
-# Raised to reflect improvements while preserving headroom
-SHORT_MIN_RATIO = 0.75
+# Tightened to track recent gains while allowing ~2% headroom
+SHORT_MIN_RATIO = 0.83
 # Maximum proportion of wrong-text decodes among overlapping decodes (success+wrong)
 SHORT_MAX_FALSE_OVERLAP_RATIO = 0.25
 
