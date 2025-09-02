@@ -32,6 +32,7 @@ jobs:
       - name: Run setup and tests (verbose)
         env:
           FT8R_WHITEN_ENABLE: '1'
+          FT8R_WHITEN_MODE: global
           FT8R_COARSE_MODE: peak
           FT8R_MAX_CANDIDATES: '1500'
           FT8R_MIN_LLR_AVG: '0.0'
