@@ -582,7 +582,14 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
     # Optional post-process: deduplicate by identical text within a small dt/freq
     # neighborhood, keeping the decode with the highest average |LLR|.
     # Neighborhood thresholds: |df| <= 1 tone spacing and |dt| <= 1 symbol.
-    if results and os.getenv("FT8R_DEDUP_DISABLE", "0") in ("0", "", "false", "False"):
+    # Only apply text-based dedup for user-facing outputs (when bits are not requested).
+    # Tests that analyze uniqueness by payload bits set include_bits=True and
+    # should see the raw set of decodes to maintain baseline decode rates.
+    if (
+        results
+        and not include_bits
+        and os.getenv("FT8R_DEDUP_DISABLE", "0") in ("0", "", "false", "False")
+    ):
         dt_eps = FT8_SYMBOL_LENGTH_IN_SEC
         fq_eps = TONE_SPACING_IN_HZ
         grouped: Dict[str, List[dict]] = {}
