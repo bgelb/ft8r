@@ -566,11 +566,56 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
                 }
                 if include_bits:
                     rec["bits"] = decoded_bits
+                # Track average |LLR| used for this decode for downstream
+                # deduplication (choose strongest evidence per neighborhood).
+                try:
+                    rec["_llr_avg"] = float(np.mean(np.abs(llrs)))
+                except Exception:
+                    rec["_llr_avg"] = 0.0
                 results.append(rec)
             decoded_any = True
         except Exception:
             decoded_any = False
 
         # Legacy alignment removed
+
+    # Post-process: deduplicate by identical text within a small dt/freq
+    # neighborhood, keeping the decode with the highest average |LLR|.
+    # Neighborhood thresholds: |df| <= 1 tone spacing and |dt| <= 1 symbol.
+    if results:
+        dt_eps = FT8_SYMBOL_LENGTH_IN_SEC
+        fq_eps = TONE_SPACING_IN_HZ
+        grouped: Dict[str, List[dict]] = {}
+        order_counter = 0
+        for r in results:
+            msg = r.get("message", "")
+            lst = grouped.setdefault(msg, [])
+            placed = False
+            for i, rep in enumerate(lst):
+                if (
+                    abs(float(r.get("dt", 0.0)) - float(rep.get("dt", 0.0))) <= dt_eps
+                    and abs(float(r.get("freq", 0.0)) - float(rep.get("freq", 0.0))) <= fq_eps
+                ):
+                    placed = True
+                    mu_r = float(r.get("_llr_avg", 0.0))
+                    mu_rep = float(rep.get("_llr_avg", 0.0))
+                    if mu_r > mu_rep:
+                        # Replace representative but preserve stable ordering
+                        r["_order"] = rep.get("_order", order_counter)
+                        lst[i] = r
+                    break
+            if not placed:
+                r["_order"] = order_counter
+                lst.append(r)
+                order_counter += 1
+
+        deduped: List[dict] = []
+        for lst in grouped.values():
+            deduped.extend(lst)
+        deduped.sort(key=lambda x: int(x.get("_order", 0)))
+        for r in deduped:
+            r.pop("_order", None)
+            r.pop("_llr_avg", None)
+        return deduped
 
     return results
