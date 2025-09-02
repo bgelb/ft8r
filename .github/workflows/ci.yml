@@ -39,7 +39,6 @@ jobs:
           FT8R_DEBUG_WHITEN: '1'
           FT8R_DEBUG_COARSE: '1'
           FT8R_SAMPLES_REF: '2.0'
-          FT8R_DEDUP_DISABLE: '1'
         run: |
           bash scripts/setup_env.sh --test
 
