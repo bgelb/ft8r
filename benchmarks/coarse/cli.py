@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List, Optional
+from utils.golden import normalize_wsjtx_message
 
 
 # Public CLI entrypoint
@@ -88,21 +89,13 @@ def _parse_wsjt_txt_line(line: str) -> Optional[GoldenRow]:
         return None
     # Expected like: "000000  -5  1.1  809 ~  SQ5FBI G3NDC IO91"
     try:
-        def _normalize_msg(msg: str) -> str:
-            # Remove appended metadata after runs of 2+ spaces (e.g., "AS Turkey").
-            # Collapse internal whitespace to single spaces.
-            import re
-            s = (msg or "").strip()
-            s = re.split(r"\s{2,}", s)[0]
-            s = re.sub(r"\s+", " ", s)
-            return s
         # Split once around the tilde to separate the message
         if "~" in line:
             left, msg = line.split("~", 1)
-            msg = _normalize_msg(msg)
+            msg = normalize_wsjtx_message(msg)
         else:
             parts = line.split(maxsplit=5)
-            msg = _normalize_msg(parts[5]) if len(parts) >= 6 else ""
+            msg = normalize_wsjtx_message(parts[5]) if len(parts) >= 6 else ""
             left = " ".join(parts[:5])
         lparts = left.split()
         # lparts: [time_tag, snr, dt, freq]
@@ -353,4 +346,3 @@ def cmd_report(metrics_path: Path, out_dir: Path) -> int:
     md.append(f"- p90_near_rank: {m.get('p90_near_rank')}")
     (out_dir / "report.md").write_text("\n".join(md))
     return 0
-
