@@ -6,6 +6,7 @@ import pytest
 
 from demod import decode_full_period
 from utils import read_wav, FT8_SYMBOL_LENGTH_IN_SEC, TONE_SPACING_IN_HZ
+from utils.golden import normalize_wsjtx_message
 from tests.utils import DEFAULT_DT_EPS, DEFAULT_FREQ_EPS, ft8code_bits, resolve_wsjt_binary
 
 # Directory containing sample WAVs and accompanying TXT files from ft8_lib
@@ -30,7 +31,7 @@ def parse_expected(path: Path):
         if not m:
             continue
         _snr, dt, freq, msg = m.groups()
-        msg = re.sub(r"\s{2,}.*", "", msg).strip()
+        msg = normalize_wsjtx_message(msg)
         records.append((msg, float(dt), float(freq)))
     return records
 

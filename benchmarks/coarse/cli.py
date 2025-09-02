@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List, Optional
+from utils.golden import normalize_wsjtx_message
 
 
 # Public CLI entrypoint
@@ -91,10 +92,10 @@ def _parse_wsjt_txt_line(line: str) -> Optional[GoldenRow]:
         # Split once around the tilde to separate the message
         if "~" in line:
             left, msg = line.split("~", 1)
-            msg = msg.strip()
+            msg = normalize_wsjtx_message(msg)
         else:
             parts = line.split(maxsplit=5)
-            msg = parts[5].strip() if len(parts) >= 6 else ""
+            msg = normalize_wsjtx_message(parts[5]) if len(parts) >= 6 else ""
             left = " ".join(parts[:5])
         lparts = left.split()
         # lparts: [time_tag, snr, dt, freq]
@@ -345,5 +346,3 @@ def cmd_report(metrics_path: Path, out_dir: Path) -> int:
     md.append(f"- p90_near_rank: {m.get('p90_near_rank')}")
     (out_dir / "report.md").write_text("\n".join(md))
     return 0
-
-
