@@ -8,6 +8,7 @@ from tests.test_sample_wavs import (
     parse_expected,
     list_all_stems,
     _strict_eps,
+    assert_no_unexpected_duplicates,
 )
 
 
@@ -51,6 +52,7 @@ def test_decode_sample_wavs_short_aggregate(ft8r_metrics):
 
         audio = read_wav(str(wav_path))
         results = decode_full_period(audio, include_bits=True)
+        assert_no_unexpected_duplicates(results)
         raw_decodes += len(results)
         hard_crc_total += sum(1 for r in results if r.get("method") == "hard")
         # Deduplicate by payload bits; store corresponding text

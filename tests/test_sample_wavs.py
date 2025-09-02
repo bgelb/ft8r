@@ -106,6 +106,28 @@ def _bits_for_message(msg: str) -> str | None:
     return None
 
 
+def assert_no_unexpected_duplicates(results: list[dict]) -> None:
+    """Ensure decoded results contain no near-duplicate messages.
+
+    Two decodes are considered duplicates if they have identical text and
+    identical payload bits and are within one FT8 symbol period in time and one
+    tone bin in frequency.  Such duplicates should have been suppressed by the
+    decoder's dedup routine.
+    """
+    dt_eps, fq_eps = _strict_eps()
+    for i, a in enumerate(results):
+        for b in results[i + 1 :]:
+            if (
+                a.get("message") == b.get("message")
+                and a.get("bits") == b.get("bits")
+                and abs(a.get("dt", 0.0) - b.get("dt", 0.0)) <= dt_eps
+                and abs(a.get("freq", 0.0) - b.get("freq", 0.0)) <= fq_eps
+            ):
+                raise AssertionError(
+                    f"Duplicate decode for {a.get('message')} at dt={a.get('dt')} freq={a.get('freq')}"
+                )
+
+
 def test_decode_sample_wavs_aggregate():
     t0 = time.monotonic()
     decoded_map: dict[str, str] = {}
@@ -134,6 +156,7 @@ def test_decode_sample_wavs_aggregate():
 
         audio = read_wav(str(wav_path))
         results = decode_full_period(audio, include_bits=True)
+        assert_no_unexpected_duplicates(results)
 
         raw_decodes += len(results)
         hard_crc_total += sum(1 for r in results if r.get("method") == "hard")
