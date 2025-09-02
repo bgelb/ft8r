@@ -41,12 +41,12 @@ jobs:
           env | sort | grep '^FT8R_' || true
           echo "\nPython-side whitening detection:" || true
           python - <<'PY'
-import os
-flag = os.getenv('FT8R_WHITEN_ENABLE')
-enabled = (flag is None) or (flag not in ('0','false','False'))
-print('FT8R_WHITEN_ENABLE raw =', repr(flag))
-print('whitening_enabled (computed) =', enabled)
-PY
+          import os
+          flag = os.getenv('FT8R_WHITEN_ENABLE')
+          enabled = (flag is None) or (flag not in ('0','false','False'))
+          print('FT8R_WHITEN_ENABLE raw =', repr(flag))
+          print('whitening_enabled (computed) =', enabled)
+          PY
 
       - name: Read short regression metrics
         if: always()
