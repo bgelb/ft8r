@@ -442,6 +442,47 @@ def ldpc_decode(llrs: np.ndarray) -> str:
 # No CRC-guided flipping: only structurally correct mapping is used.
 
 
+def _dedup_decodes(records: List[Dict]) -> List[Dict]:
+    """Return ``records`` with near-duplicate decodes removed.
+
+    Messages with identical decoded text (and identical payload bits when
+    available) that fall within one FT8 tone bin and one symbol period of each
+    other are considered duplicates.  The decode with the highest average
+    absolute LLR is kept to represent the group.
+    """
+
+    by_msg: Dict[tuple[str, str | None], List[Dict]] = {}
+    for rec in records:
+        key = (rec.get("message", ""), rec.get("bits"))
+        by_msg.setdefault(key, []).append(rec)
+
+    deduped: List[Dict] = []
+    for recs in by_msg.values():
+        recs.sort(key=lambda r: abs(r.get("llr", 0.0)), reverse=True)
+        groups: List[List[Dict]] = []
+        for r in recs:
+            placed = False
+            for g in groups:
+                if all(
+                    abs(r["freq"] - k["freq"]) <= TONE_SPACING_IN_HZ
+                    and abs(r["dt"] - k["dt"]) <= FT8_SYMBOL_LENGTH_IN_SEC
+                    for k in g
+                ):
+                    g.append(r)
+                    placed = True
+                    break
+            if not placed:
+                groups.append([r])
+        for g in groups:
+            deduped.append(g[0])
+
+    for rec in deduped:
+        rec.pop("llr", None)
+
+    deduped.sort(key=lambda r: r["score"], reverse=True)
+    return deduped
+
+
 def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, include_bits: bool = False):
     """Decode all FT8 signals present in ``samples_in``.
 
@@ -557,12 +598,14 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
             # Enforce CRC gating after LDPC/hard decision (after optional microsearch)
             if _ALLOW_CRC_FAIL or check_crc(decoded_bits):
                 text = decode77(decoded_bits[:77])
+                mu = float(np.mean(np.abs(llrs)))
                 rec = {
                     "message": text,
                     "score": score,
                     "freq": freq_f,
                     "dt": dt_f,
                     "method": method,
+                    "llr": mu,
                 }
                 if include_bits:
                     rec["bits"] = decoded_bits
@@ -573,4 +616,4 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
 
         # Legacy alignment removed
 
-    return results
+    return _dedup_decodes(results)
