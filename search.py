@@ -161,6 +161,10 @@ def candidate_score_map(
         or _whiten_flag not in ("0", "false", "False")
     )
     if _whiten_enabled:
+        global _DBG_WHITEN_PRINTED
+        if os.getenv("FT8R_DEBUG_WHITEN", "") and not _DBG_WHITEN_PRINTED:
+            print("[ft8r.debug] whitening=enabled flag=", repr(_whiten_flag))
+            _DBG_WHITEN_PRINTED = True
         eps = float(os.getenv("FT8R_WHITEN_EPS", "1e-12"))
         # Mode: 'tile' or 'global' via FT8R_WHITEN_MODE
         mode = os.getenv("FT8R_WHITEN_MODE", "tile").strip().lower()
@@ -208,6 +212,10 @@ def candidate_score_map(
                 row_med = np.median(fft_pwr, axis=1, keepdims=True)
                 row_med = np.maximum(row_med, eps)
                 fft_pwr = fft_pwr / row_med
+    else:
+        if os.getenv("FT8R_DEBUG_WHITEN", "") and not _DBG_WHITEN_PRINTED:
+            print("[ft8r.debug] whitening=disabled flag=", repr(_whiten_flag))
+            _DBG_WHITEN_PRINTED = True
 
     # Vectorized Costas correlation: sum target tone bins vs non-target bins
     with PROFILER.section("search.correlate"):
@@ -246,6 +254,10 @@ def candidate_score_map(
 
 
 import os
+
+# Debug flags (printed once per run to avoid log spam)
+_DBG_WHITEN_PRINTED = False
+_DBG_COARSE_PRINTED = False
 
 
 def peak_candidates(
@@ -441,11 +453,28 @@ def find_candidates(
 
     # Selection mode via FT8R_COARSE_MODE ('budget' or 'peak')
     mode = os.getenv("FT8R_COARSE_MODE", "budget").strip().lower()
+    global _DBG_COARSE_PRINTED
+    if os.getenv("FT8R_DEBUG_COARSE", "") and not _DBG_COARSE_PRINTED:
+        try:
+            import numpy as _np
+            stats = dict(
+                min=float(_np.min(scores)),
+                p50=float(_np.percentile(scores, 50)),
+                p90=float(_np.percentile(scores, 90)),
+                max=float(_np.max(scores)),
+            )
+        except Exception:
+            stats = {}
+        print(f"[ft8r.debug] coarse_mode={mode} scores_stats={stats}")
+        _DBG_COARSE_PRINTED = True
     if mode == "budget":
         # Target a global budget. Fall back to peak if budget invalid.
         try:
             B = int(os.getenv("FT8R_MAX_CANDIDATES", "1500"))
         except Exception:
             B = 1500
-        return budget_tile_candidates(scores, dts, freqs, threshold, budget=B if B > 0 else 1500)
+        c = budget_tile_candidates(scores, dts, freqs, threshold, budget=B if B > 0 else 1500)
+        if os.getenv("FT8R_DEBUG_COARSE", ""):
+            print(f"[ft8r.debug] coarse_selected={len(c)} budget={B}")
+        return c
     return peak_candidates(scores, dts, freqs, threshold)

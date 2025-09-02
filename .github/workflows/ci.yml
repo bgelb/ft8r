@@ -30,6 +30,13 @@ jobs:
           sudo apt-get install -y rsync unzip jq
 
       - name: Run setup and tests (verbose)
+        env:
+          FT8R_WHITEN_ENABLE: '1'
+          FT8R_COARSE_MODE: budget
+          FT8R_MAX_CANDIDATES: '1500'
+          FT8R_MIN_LLR_AVG: '0.2'
+          FT8R_DEBUG_WHITEN: '1'
+          FT8R_DEBUG_COARSE: '1'
         run: |
           bash scripts/setup_env.sh --test
 
@@ -46,6 +53,22 @@ jobs:
           enabled = (flag is None) or (flag not in ('0','false','False'))
           print('FT8R_WHITEN_ENABLE raw =', repr(flag))
           print('whitening_enabled (computed) =', enabled)
+          PY
+          echo "\nPython/numpy/scipy versions:" || true
+          python - <<'PY'
+          import platform, sys
+          print('platform:', platform.platform())
+          print('python:', sys.version)
+          try:
+              import numpy as np
+              print('numpy:', np.__version__)
+          except Exception as e:
+              print('numpy: ERROR', e)
+          try:
+              import scipy
+              print('scipy:', scipy.__version__)
+          except Exception as e:
+              print('scipy: ERROR', e)
           PY
 
       - name: Read short regression metrics
