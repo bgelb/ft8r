@@ -199,14 +199,31 @@ setup_python() {
 
 fetch_samples() {
   local zip="$TMP_DIR/ft8_lib.zip"
-  local outdir="$TMP_DIR/ft8_lib-master"
+  local ref
+  ref="${FT8R_SAMPLES_REF:-2.0}"
   mkdir -p "$TMP_DIR"
-  log "Fetching ft8_lib sample dataset"
-  download "https://codeload.github.com/kgoba/ft8_lib/zip/refs/heads/master" "$zip"
-  rm -rf "$outdir"
+  log "Fetching ft8_lib sample dataset (ref=$ref)"
+  local url
+  if [[ "$ref" == refs/* ]]; then
+    url="https://codeload.github.com/kgoba/ft8_lib/zip/$ref"
+  elif [[ "$ref" =~ ^[0-9a-fA-F]{7,}$ ]]; then
+    # Specific commit SHA
+    url="https://codeload.github.com/kgoba/ft8_lib/zip/$ref"
+  else
+    # Treat as tag by default
+    url="https://codeload.github.com/kgoba/ft8_lib/zip/refs/tags/$ref"
+  fi
+  download "$url" "$zip"
+  # Extract and detect the top-level directory name (ft8_lib-<something>)
   extract_zip "$zip" "$TMP_DIR"
+  local topdir
+  topdir="$(ls -1d "$TMP_DIR"/ft8_lib-* 2>/dev/null | head -n1 || true)"
+  if [[ -z "$topdir" || ! -d "$topdir/test/wav" ]]; then
+    echo "Failed to locate extracted ft8_lib directory under $TMP_DIR" >&2
+    exit 1
+  fi
   mkdir -p "$SAMPLES_DST_DIR"
-  rsync -a "$outdir/test/wav/" "$SAMPLES_DST_DIR/"
+  rsync -a "$topdir/test/wav/" "$SAMPLES_DST_DIR/"
   local count
   count=$(find "$SAMPLES_DST_DIR" -type f \( -name '*.wav' -o -name '*.txt' \) | wc -l | tr -d ' ')
   log "Installed sample files to $SAMPLES_DST_DIR ($count files)"
