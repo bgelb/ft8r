@@ -67,10 +67,9 @@ def test_coarse_recall_ratchet():
     coarse_recall = float(m.get("coarse_recall", -1.0))
     assert 0.0 <= coarse_recall <= 1.0, "Invalid coarse_recall"
 
-    # Baseline (measured): ~0.692; allow small slack to avoid flakiness
-    target = float(os.getenv("FT8R_COARSE_RATCHET_TARGET", "0.68"))
+    # Baseline (measured): ~0.727 on current implementation; keep slack
+    target = float(os.getenv("FT8R_COARSE_RATCHET_TARGET", "0.72"))
     assert coarse_recall >= target, (
         f"coarse_recall regression: {coarse_recall:.4f} < target {target:.4f}"
     )
-
 
