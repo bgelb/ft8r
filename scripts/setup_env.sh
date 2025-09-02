@@ -220,6 +220,12 @@ run_tests() {
   # caller's environment. This avoids accidental use of a global install.
   unset WSJTX_BIN_DIR || true
   export WSJTX_BIN_DIR="$BIN_DIR"
+  # Enforce baseline FT8R defaults for CI/regression runs even if the
+  # outer environment exported blank or conflicting values.
+  export FT8R_WHITEN_ENABLE="${FT8R_WHITEN_ENABLE:-1}"
+  export FT8R_COARSE_MODE="${FT8R_COARSE_MODE:-budget}"
+  export FT8R_MAX_CANDIDATES="${FT8R_MAX_CANDIDATES:-1500}"
+  export FT8R_MIN_LLR_AVG="${FT8R_MIN_LLR_AVG:-0.2}"
   log "Using WSJTX_BIN_DIR=$WSJTX_BIN_DIR"
   log "Running pytest (verbose, durations, show skip reasons)"
   pytest -vv -ra --durations=25

@@ -152,8 +152,15 @@ def candidate_score_map(
         fft_pwr = np.abs(ffts) ** 2
 
     # Optional local whitening/normalization to improve contrast in busy bands.
-    # Enable via FT8R_WHITEN_ENABLE (1 to enable)
-    if os.getenv("FT8R_WHITEN_ENABLE", "1") not in ("0", "", "false", "False"):
+    # Enable via FT8R_WHITEN_ENABLE (1 to enable). Treat only explicit
+    # disables ("0" or case-insensitive "false") as off; an empty value
+    # still defaults to enabled to avoid CI/host shells exporting blank vars.
+    _whiten_flag = os.getenv("FT8R_WHITEN_ENABLE")
+    _whiten_enabled = (
+        _whiten_flag is None
+        or _whiten_flag not in ("0", "false", "False")
+    )
+    if _whiten_enabled:
         eps = float(os.getenv("FT8R_WHITEN_EPS", "1e-12"))
         # Mode: 'tile' or 'global' via FT8R_WHITEN_MODE
         mode = os.getenv("FT8R_WHITEN_MODE", "tile").strip().lower()
