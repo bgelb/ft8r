@@ -452,7 +452,7 @@ def find_candidates(
     )
 
     # Selection mode via FT8R_COARSE_MODE ('budget' or 'peak')
-    mode = os.getenv("FT8R_COARSE_MODE", "peak").strip().lower()
+    mode = os.getenv("FT8R_COARSE_MODE", "budget").strip().lower()
     global _DBG_COARSE_PRINTED
     if os.getenv("FT8R_DEBUG_COARSE", "") and not _DBG_COARSE_PRINTED:
         try:

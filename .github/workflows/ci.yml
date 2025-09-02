@@ -32,10 +32,10 @@ jobs:
       - name: Run setup and tests (verbose)
         env:
           FT8R_WHITEN_ENABLE: '1'
-          FT8R_WHITEN_MODE: global
-          FT8R_COARSE_MODE: peak
+          FT8R_WHITEN_MODE: tile
+          FT8R_COARSE_MODE: budget
           FT8R_MAX_CANDIDATES: '1500'
-          FT8R_MIN_LLR_AVG: '0.0'
+          FT8R_MIN_LLR_AVG: '0.2'
           FT8R_DEBUG_WHITEN: '1'
           FT8R_DEBUG_COARSE: '1'
           FT8R_SAMPLES_REF: '2.0'
