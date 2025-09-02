@@ -72,8 +72,8 @@ _EDGE_TAPER = 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, _EDGE_TAPER_LEN))
 # Optional early rejection threshold based on average |LLR|.
 try:
     # Skip LDPC (and optionally whole candidate) when average |LLR| is very low.
-    # Can be overridden via FT8R_MIN_LLR_AVG.
-    _MIN_LLR_AVG = float(os.getenv("FT8R_MIN_LLR_AVG", "0.2"))
+    # Default disabled to match test baselines; enable via FT8R_MIN_LLR_AVG.
+    _MIN_LLR_AVG = float(os.getenv("FT8R_MIN_LLR_AVG", "0.0"))
 except Exception:
     _MIN_LLR_AVG = 0.0
 _ENV_MAX = os.getenv("FT8R_MAX_CANDIDATES", "").strip()
