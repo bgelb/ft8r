@@ -4,13 +4,12 @@ This repository explores building an FT8 demodulator. The test suite can run ful
 
 Optional runtime features (env toggles):
 - Coarse whitening (improves contrast in busy bands)
-  - `FT8R_WHITEN_ENABLE=1` to enable
-  - `FT8R_WHITEN_MODE=global|tile` (default `global`); `tile` uses robust per‑tile scaling (median + α·MAD)
+  - Enabled by default; set `FT8R_WHITEN_ENABLE=0` to disable
+  - `FT8R_WHITEN_MODE=tile|global` (default `tile`); `tile` uses robust per‑tile scaling (median + α·MAD)
 - Coarse candidate selection
-  - `FT8R_COARSE_MODE=peak|budget` (default `peak`); `budget` distributes picks per tile up to `FT8R_MAX_CANDIDATES`
+  - `FT8R_COARSE_MODE=budget|peak` (default `budget`); `budget` distributes picks per tile up to `FT8R_MAX_CANDIDATES`
 - Light microsearch (single‑pass; small frequency nudges on CRC failure)
-  - `FT8R_MICRO_LIGHT_ENABLE=1` to enable
-  - `FT8R_MICRO_LIGHT_DF_SPAN` (default `1.0` Hz), `FT8R_MICRO_LIGHT_DF_STEP` (default `0.5` Hz)
+  - Configured via `FT8R_MICRO_LIGHT_DF_SPAN` (default `1.0` Hz) and `FT8R_MICRO_LIGHT_DF_STEP` (default `0.5` Hz)
 
 ### Quick start
 
