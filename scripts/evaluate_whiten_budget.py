@@ -67,9 +67,7 @@ def main() -> int:
 
     # Enable whitening (tile mode) and budgeted per-tile selection
     os.environ['FT8R_WHITEN_ENABLE'] = '1'
-    os.environ['FT8R_WHITEN_MODE'] = os.environ.get('FT8R_WHITEN_MODE', 'tile')
     os.environ['FT8R_WHITEN_MAD_ALPHA'] = os.environ.get('FT8R_WHITEN_MAD_ALPHA', '3.0')
-    os.environ['FT8R_COARSE_MODE'] = 'budget'
     # Conservative per-tile K to spread selection
     os.environ['FT8R_COARSE_ADAPTIVE_PER_TILE_K'] = os.environ.get('FT8R_COARSE_ADAPTIVE_PER_TILE_K', '2')
     os.environ['FT8R_COARSE_ADAPTIVE_TILE_DT'] = os.environ.get('FT8R_COARSE_ADAPTIVE_TILE_DT', '8')
@@ -101,4 +99,3 @@ def main() -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
-

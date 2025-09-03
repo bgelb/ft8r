@@ -21,12 +21,12 @@ The decoder processes one 15‑second FT8 cycle of mono PCM audio and returns al
 - Key functions:
   - `candidate_score_map(samples_in, max_freq_bin, max_dt_in_symbols)`
   - `budget_tile_candidates(scores, dts, freqs, threshold, budget)`
-  - `peak_candidates(scores, dts, freqs, threshold)`
+  - `peak_candidates(scores, dts, freqs, threshold)` (utility; not used in default pipeline)
   - `find_candidates(samples_in, max_freq_bin, max_dt_in_symbols, threshold)`
 
 The input audio is evaluated over a time/frequency grid using short FFTs at an oversampling ratio in time and frequency. A Costas‑sequence kernel identifies likely FT8 starts via a Costas power ratio (active bins vs. unused Costas bins), and local maxima above `threshold` are returned as `(score, dt, base_freq)` candidates.
 
-`find_candidates` selects peaks either by a global per‑tile budget (`budget_tile_candidates`, default via `FT8R_COARSE_MODE=budget`) or by simple local maxima (`peak_candidates` when `FT8R_COARSE_MODE=peak`).
+`find_candidates` uses budgeted per‑tile selection (`budget_tile_candidates`) to control candidate counts. `peak_candidates` remains available for experiments and tests.
 
 #### Narrow‑band baseband extraction
 
@@ -108,10 +108,7 @@ All changes preserve numerical results; any behavior differences can be gated vi
 
 The legacy alignment toggles have been removed.
 
-- `FT8R_MIN_LLR_AVG` (default: `0.0` = disabled)
-  - If set to a positive float, performs an early reject when average |LLR| for a candidate is below this threshold, skipping LDPC. Trade‑off: can significantly reduce LDPC workload but risks dropping very weak decodes if set too high. Recommended only for latency‑critical deployments after tuning on your signal set.
-
-Additional flags used in CI/testing:
+- Additional flags used in CI/testing:
 
 - `FT8R_PERF`, `FT8R_PERF_STEM`, `FT8R_PERF_REPEATS`, `FT8R_TARGET_S`, `FT8R_PERF_ALLOW_FAIL` control the opt‑in performance test.
 
