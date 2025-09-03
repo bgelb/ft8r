@@ -7,7 +7,7 @@ Optional runtime features (env toggles):
   - Enabled by default; set `FT8R_WHITEN_ENABLE=0` to disable
   - `FT8R_WHITEN_MODE=tile|global` (default `tile`); `tile` uses robust per‑tile scaling (median + α·MAD)
 - Coarse candidate selection
-  - `FT8R_COARSE_MODE=budget|peak` (default `budget`); `budget` distributes picks per tile up to `FT8R_MAX_CANDIDATES`
+  - Budgeted per-tile selection up to `FT8R_MAX_CANDIDATES` (no mode switch)
 - Light microsearch (single‑pass; small frequency nudges on CRC failure)
   - Configured via `FT8R_MICRO_LIGHT_DF_SPAN` (default `1.0` Hz) and `FT8R_MICRO_LIGHT_DF_STEP` (default `0.5` Hz)
 
