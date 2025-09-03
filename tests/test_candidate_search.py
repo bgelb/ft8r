@@ -1,5 +1,6 @@
 from search import find_candidates, candidate_score_map, peak_candidates
 import numpy as np
+import os
 from utils import (
     read_wav,
     RealSamples,
@@ -111,8 +112,12 @@ def test_candidate_peak_filter(tmp_path):
     assert abs(dt - 0.0) < DEFAULT_DT_EPS
     assert score > DEFAULT_SEARCH_THRESHOLD
 
-    # ``find_candidates`` should yield the same result via ``peak_candidates``
-    via_api = find_candidates(
-        audio, max_freq_bin, max_dt_symbols, threshold=thresh
-    )
+    # ``find_candidates`` should yield the same result when mode='peak'
+    os.environ["FT8R_COARSE_MODE"] = "peak"
+    try:
+        via_api = find_candidates(
+            audio, max_freq_bin, max_dt_symbols, threshold=thresh
+        )
+    finally:
+        os.environ.pop("FT8R_COARSE_MODE", None)
     assert via_api == peaks

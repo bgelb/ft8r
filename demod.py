@@ -80,11 +80,8 @@ _ENV_MAX = os.getenv("FT8R_MAX_CANDIDATES", "").strip()
 # Default cap chosen from empirical candidate distribution (p99≈1244, max≈1260)
 # across bundled samples, with headroom. Set to 0 to disable capping.
 _MAX_CANDIDATES = 1500 if _ENV_MAX == "" else int(_ENV_MAX)
-# Legacy alignment path removed.
 # Allow bypassing CRC gating for troubleshooting only. Defaults to disabled.
 _ALLOW_CRC_FAIL = os.getenv("FT8R_ALLOW_CRC_FAIL", "0") not in ("0", "", "false", "False")
-# Column reordering around LDPC is not used; H columns match transmitted order.
-# Optional debug: include raw decoded bits and parity/CRC flags in results
 # Offset of the band edges relative to ``freq`` expressed in tone spacings.
 # ``freq`` corresponds to tone 0 so the bottom edge lies 1.5 tone spacings
 # below it and the top edge is ``SLICE_SPAN_TONES - 1.5`` spacings above.
@@ -613,7 +610,5 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
             decoded_any = True
         except Exception:
             decoded_any = False
-
-        # Legacy alignment removed
 
     return _dedup_decodes(results)

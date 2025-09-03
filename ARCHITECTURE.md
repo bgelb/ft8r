@@ -20,10 +20,13 @@ The decoder processes one 15‑second FT8 cycle of mono PCM audio and returns al
 - File: `search.py`
 - Key functions:
   - `candidate_score_map(samples_in, max_freq_bin, max_dt_in_symbols)`
+  - `budget_tile_candidates(scores, dts, freqs, threshold, budget)`
   - `peak_candidates(scores, dts, freqs, threshold)`
   - `find_candidates(samples_in, max_freq_bin, max_dt_in_symbols, threshold)`
 
 The input audio is evaluated over a time/frequency grid using short FFTs at an oversampling ratio in time and frequency. A Costas‑sequence kernel identifies likely FT8 starts via a Costas power ratio (active bins vs. unused Costas bins), and local maxima above `threshold` are returned as `(score, dt, base_freq)` candidates.
+
+`find_candidates` selects peaks either by a global per‑tile budget (`budget_tile_candidates`, default via `FT8R_COARSE_MODE=budget`) or by simple local maxima (`peak_candidates` when `FT8R_COARSE_MODE=peak`).
 
 #### Narrow‑band baseband extraction
 
@@ -68,7 +71,7 @@ LLRs are converted into per‑bit error probabilities (with reliability scaling)
 - File: `demod.py`
 - Key function: `decode_full_period(samples_in, threshold)`
 
-Calls the candidate search, applies refined (quadratic) fine synchronization, demodulates, LDPC‑decodes, and text‑decodes each valid message. Each successful decode returns a dictionary with `message`, `score`, `freq`, and `dt`.
+Calls the candidate search, applies refined (quadratic) fine synchronization, performs a light frequency microsearch on CRC failure, demodulates, LDPC‑decodes, and text‑decodes each valid message. Each successful decode returns a dictionary with `message`, `score`, `freq`, `dt`, and the decode `method` (`hard` or `ldpc`).
 
 ### Performance tuning and profiling
 
