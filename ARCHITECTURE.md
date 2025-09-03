@@ -108,10 +108,7 @@ All changes preserve numerical results; any behavior differences can be gated vi
 
 The legacy alignment toggles have been removed.
 
-- `FT8R_MIN_LLR_AVG` (default: `0.0` = disabled)
-  - If set to a positive float, performs an early reject when average |LLR| for a candidate is below this threshold, skipping LDPC. Trade‑off: can significantly reduce LDPC workload but risks dropping very weak decodes if set too high. Recommended only for latency‑critical deployments after tuning on your signal set.
-
-Additional flags used in CI/testing:
+- Additional flags used in CI/testing:
 
 - `FT8R_PERF`, `FT8R_PERF_STEM`, `FT8R_PERF_REPEATS`, `FT8R_TARGET_S`, `FT8R_PERF_ALLOW_FAIL` control the opt‑in performance test.
 
