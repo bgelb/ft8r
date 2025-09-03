@@ -69,13 +69,8 @@ _EDGE_TAPER_LEN = 101
 # Precompute fixed edge taper window used for band slicing
 _EDGE_TAPER = 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, _EDGE_TAPER_LEN))
 
-# Optional early rejection threshold based on average |LLR|.
-try:
-    # Skip LDPC (and optionally whole candidate) when average |LLR| is very low.
-    # Can be overridden via FT8R_MIN_LLR_AVG.
-    _MIN_LLR_AVG = float(os.getenv("FT8R_MIN_LLR_AVG", "0.2"))
-except Exception:
-    _MIN_LLR_AVG = 0.0
+# Early rejection by average |LLR| was experimentally disabled and is removed
+_MIN_LLR_AVG = 0.0
 _ENV_MAX = os.getenv("FT8R_MAX_CANDIDATES", "").strip()
 # Default cap chosen from empirical candidate distribution (p99≈1244, max≈1260)
 # across bundled samples, with headroom. Set to 0 to disable capping.
@@ -532,7 +527,6 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
         if start - margin < 0 or end + margin > len(samples_in.samples):
             continue
         # Run refined alignment path
-        decoded_any = False
         try:
             with PROFILER.section("align.pipeline_refined"):
                 bb, dt_f, freq_f = fine_sync_candidate(
@@ -540,10 +534,8 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
                 )
             with PROFILER.section("demod.soft"):
                 llrs = soft_demod(bb)
-            # Optional quick rejection by average |LLR|
+            # Compute mean |LLR| for diagnostics only
             mu0 = float(np.mean(np.abs(llrs)))
-            if _MIN_LLR_AVG > 0.0 and mu0 < _MIN_LLR_AVG:
-                raise RuntimeError("low_llr")
             # Try hard-decision CRC first
             hard_bits = naive_hard_decode(llrs)
             method = "hard"
@@ -574,8 +566,7 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
                     with PROFILER.section("demod.soft"):
                         llrs2 = soft_demod(bb2)
                     mu2 = float(np.mean(np.abs(llrs2)))
-                    if _MIN_LLR_AVG > 0.0 and mu2 < _MIN_LLR_AVG:
-                        continue
+                    # No early gate; only tracking best-mu for later LDPC
                     hard2 = naive_hard_decode(llrs2)
                     if check_crc(hard2):
                         decoded_bits = hard2
@@ -607,8 +598,7 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
                 if include_bits:
                     rec["bits"] = decoded_bits
                 results.append(rec)
-            decoded_any = True
         except Exception:
-            decoded_any = False
+            pass
 
     return _dedup_decodes(results)
