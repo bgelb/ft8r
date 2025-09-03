@@ -432,13 +432,9 @@ def find_candidates(
         max_dt_in_symbols,
     )
 
-    # Selection mode via FT8R_COARSE_MODE ('budget' or 'peak')
-    mode = os.getenv("FT8R_COARSE_MODE", "budget").strip().lower()
-    if mode == "budget":
-        # Target a global budget. Fall back to peak if budget invalid.
-        try:
-            B = int(os.getenv("FT8R_MAX_CANDIDATES", "1500"))
-        except Exception:
-            B = 1500
-        return budget_tile_candidates(scores, dts, freqs, threshold, budget=B if B > 0 else 1500)
-    return peak_candidates(scores, dts, freqs, threshold)
+    # Always use budgeted per-tile selection to control candidate counts
+    try:
+        B = int(os.getenv("FT8R_MAX_CANDIDATES", "1500"))
+    except Exception:
+        B = 1500
+    return budget_tile_candidates(scores, dts, freqs, threshold, budget=B if B > 0 else 1500)
