@@ -152,55 +152,39 @@ def candidate_score_map(
         fft_pwr = np.abs(ffts) ** 2
 
     # Optional local whitening/normalization to improve contrast in busy bands.
-    # Enabled by default; disable via FT8R_WHITEN_ENABLE=0
+    # Enabled by default; disable via FT8R_WHITEN_ENABLE=0. Uses robust per-tile scaling.
     if os.getenv("FT8R_WHITEN_ENABLE", "1") not in ("0", "", "false", "False"):
         eps = float(os.getenv("FT8R_WHITEN_EPS", "1e-12"))
-        # Mode: 'tile' or 'global' via FT8R_WHITEN_MODE (default 'tile')
-        mode = os.getenv("FT8R_WHITEN_MODE", "tile").strip().lower()
-        if mode == "tile":
-            # Robust local scaling via non-overlapping tiles:
-            # For each tile T, compute med_T = median(T), mad_T = median(|T - med_T|),
-            # then divide all elements in T by (med_T + alpha * mad_T + eps).
-            alpha = float(os.getenv("FT8R_WHITEN_MAD_ALPHA", "3.0"))
-            rows_per_sec = sample_rate / (sym_len // TIME_SEARCH_OVERSAMPLING_RATIO)
-            default_dt_rows = max(1, int(round(0.5 * rows_per_sec)))
-            default_df_bins = max(1, int(round(100.0 / TONE_SPACING_IN_HZ)))
-            tile_dt = int(os.getenv("FT8R_WHITEN_TILE_DT", str(default_dt_rows)))
-            tile_df = int(os.getenv("FT8R_WHITEN_TILE_FREQ", str(default_df_bins)))
-            H, W = fft_pwr.shape
-            # Pad to multiples of tile size
-            Hp = ((H + tile_dt - 1) // tile_dt) * tile_dt
-            Wp = ((W + tile_df - 1) // tile_df) * tile_df
-            with PROFILER.section("search.whiten.tile.pad"):
-                pad_h = Hp - H
-                pad_w = Wp - W
-                if pad_h or pad_w:
-                    fft_pad = np.pad(fft_pwr, ((0, pad_h), (0, pad_w)), mode="edge")
-                else:
-                    fft_pad = fft_pwr
-            with PROFILER.section("search.whiten.tile.block_median"):
-                blocks = fft_pad.reshape(Hp // tile_dt, tile_dt, Wp // tile_df, tile_df)
-                med_tiles = np.median(blocks, axis=(1, 3))  # (Hb, Wb)
-                med_map = np.repeat(np.repeat(med_tiles, tile_dt, axis=0), tile_df, axis=1)
-                med_map = med_map[:H, :W]
-            with PROFILER.section("search.whiten.tile.block_mad"):
-                dev_pad = np.abs(fft_pad - np.repeat(np.repeat(med_tiles, tile_dt, axis=0), tile_df, axis=1))
-                dev_blocks = dev_pad.reshape(Hp // tile_dt, tile_dt, Wp // tile_df, tile_df)
-                mad_tiles = np.median(dev_blocks, axis=(1, 3))
-                mad_map = np.repeat(np.repeat(mad_tiles, tile_dt, axis=0), tile_df, axis=1)
-                mad_map = mad_map[:H, :W]
-            with PROFILER.section("search.whiten.tile.apply"):
-                scale = med_map + alpha * mad_map + eps
-                fft_pwr = fft_pwr / scale
-        else:
-            with PROFILER.section("search.whiten.freq"):
-                col_med = np.median(fft_pwr, axis=0)
-                col_med = np.maximum(col_med, eps)
-                fft_pwr = fft_pwr / col_med
-            with PROFILER.section("search.whiten.time"):
-                row_med = np.median(fft_pwr, axis=1, keepdims=True)
-                row_med = np.maximum(row_med, eps)
-                fft_pwr = fft_pwr / row_med
+        alpha = float(os.getenv("FT8R_WHITEN_MAD_ALPHA", "3.0"))
+        rows_per_sec = sample_rate / (sym_len // TIME_SEARCH_OVERSAMPLING_RATIO)
+        default_dt_rows = max(1, int(round(0.5 * rows_per_sec)))
+        default_df_bins = max(1, int(round(100.0 / TONE_SPACING_IN_HZ)))
+        tile_dt = int(os.getenv("FT8R_WHITEN_TILE_DT", str(default_dt_rows)))
+        tile_df = int(os.getenv("FT8R_WHITEN_TILE_FREQ", str(default_df_bins)))
+        H, W = fft_pwr.shape
+        Hp = ((H + tile_dt - 1) // tile_dt) * tile_dt
+        Wp = ((W + tile_df - 1) // tile_df) * tile_df
+        with PROFILER.section("search.whiten.tile.pad"):
+            pad_h = Hp - H
+            pad_w = Wp - W
+            if pad_h or pad_w:
+                fft_pad = np.pad(fft_pwr, ((0, pad_h), (0, pad_w)), mode="edge")
+            else:
+                fft_pad = fft_pwr
+        with PROFILER.section("search.whiten.tile.block_median"):
+            blocks = fft_pad.reshape(Hp // tile_dt, tile_dt, Wp // tile_df, tile_df)
+            med_tiles = np.median(blocks, axis=(1, 3))  # (Hb, Wb)
+            med_map = np.repeat(np.repeat(med_tiles, tile_dt, axis=0), tile_df, axis=1)
+            med_map = med_map[:H, :W]
+        with PROFILER.section("search.whiten.tile.block_mad"):
+            dev_pad = np.abs(fft_pad - np.repeat(np.repeat(med_tiles, tile_dt, axis=0), tile_df, axis=1))
+            dev_blocks = dev_pad.reshape(Hp // tile_dt, tile_dt, Wp // tile_df, tile_df)
+            mad_tiles = np.median(dev_blocks, axis=(1, 3))
+            mad_map = np.repeat(np.repeat(mad_tiles, tile_dt, axis=0), tile_df, axis=1)
+            mad_map = mad_map[:H, :W]
+        with PROFILER.section("search.whiten.tile.apply"):
+            scale = med_map + alpha * mad_map + eps
+            fft_pwr = fft_pwr / scale
 
     # Vectorized Costas correlation: sum target tone bins vs non-target bins
     with PROFILER.section("search.correlate"):

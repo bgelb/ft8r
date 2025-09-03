@@ -200,8 +200,6 @@ def main() -> int:
     default_ok = 0
 
     os.environ['FT8R_WHITEN_ENABLE'] = '1'
-    os.environ['FT8R_WHITEN_MODE'] = os.environ.get('FT8R_WHITEN_MODE', 'tile')
-    os.environ['FT8R_COARSE_MODE'] = 'budget'
 
     for wav in wavs:
         exp = parse_expected(wav.with_suffix('.txt'))
@@ -256,4 +254,3 @@ def main() -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
-
