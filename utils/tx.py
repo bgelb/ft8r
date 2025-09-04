@@ -48,7 +48,8 @@ def generate_ft8_waveform(
     *,
     start_offset_sec: float = None,
     total_duration_sec: float = 15.0,
-    amplitude: float = 0.9,
+    amplitude: float = 1.0,
+    ramp_fraction: float = 0.5,
 ):
     """Synthesize a mono FT8 audio period containing a single transmission.
 
@@ -76,15 +77,26 @@ def generate_ft8_waveform(
     phase = 0.0
     two_pi = 2.0 * np.pi
 
+    # Precompute window with raised-cosine ramps
+    L = max(0, min(sym_len // 2, int(round(ramp_fraction * sym_len))))
+    if L == 0:
+        win = np.ones(sym_len, dtype=float)
+    else:
+        win = np.ones(sym_len, dtype=float)
+        n = np.arange(L)
+        fade = 0.5 * (1 - np.cos(np.pi * (n + 1) / (L + 1)))
+        win[:L] = fade
+        win[-L:] = fade[::-1]
+
     for i in range(n_sym_total):
         f = base_freq_hz + tones[i] * TONE_SPACING_IN_HZ
         n0 = start_idx + i * sym_len
         n1 = n0 + sym_len
         t = (np.arange(sym_len) / sample_rate)
-        # continuous-phase tone for this symbol starting at accumulated phase
         phi = phase + two_pi * f * t
-        sig[n0:n1] = amplitude * np.cos(phi)
-        # update phase at boundary for continuity
+        tone = np.cos(phi) * win
+        # Overlap-add takes care of ramps at boundaries
+        sig[n0:n1] += amplitude * tone
         phase = (phase + two_pi * f * (sym_len / sample_rate)) % (2 * np.pi)
 
     return RealSamples(sig, sample_rate_in_hz=sample_rate)
