@@ -48,7 +48,9 @@ def generate_ft8_waveform(
     *,
     start_offset_sec: float = None,
     total_duration_sec: float = 15.0,
-    amplitude: float = 0.9,
+    amplitude: float = 1.0,
+    ramp_fraction: float = 0.5,
+    ramp_samples: int | None = None,
 ):
     """Synthesize a mono FT8 audio period containing a single transmission.
 
@@ -69,22 +71,42 @@ def generate_ft8_waveform(
     sym_len = int(round(sample_rate * FT8_SYMBOL_LENGTH_IN_SEC))
     tones = tones_from_bits(bits174)
 
-    # Time indices per symbol
+    # Output buffer
     sig = np.zeros(int(total_duration_sec * sample_rate), dtype=float)
     start_idx = int(round(start_offset_sec * sample_rate))
     n_sym_total = FT8_SYMBOLS_PER_MESSAGE
-    phase = 0.0
     two_pi = 2.0 * np.pi
 
+    # Continuous-phase FSK with symmetric raised-cosine frequency transitions
+    active_len = n_sym_total * sym_len
+    # Ramp half-width in samples
+    if ramp_samples is None:
+        L = max(0, min(sym_len // 2, int(round(ramp_fraction * sym_len))))
+    else:
+        L = max(0, min(sym_len // 2, int(ramp_samples)))
+    # Build instantaneous frequency array
+    tone_freqs = [base_freq_hz + t * TONE_SPACING_IN_HZ for t in tones]
+    f_inst = np.empty(active_len, dtype=float)
+    # Start with step frequencies
     for i in range(n_sym_total):
-        f = base_freq_hz + tones[i] * TONE_SPACING_IN_HZ
-        n0 = start_idx + i * sym_len
-        n1 = n0 + sym_len
-        t = (np.arange(sym_len) / sample_rate)
-        # continuous-phase tone for this symbol starting at accumulated phase
-        phi = phase + two_pi * f * t
-        sig[n0:n1] = amplitude * np.cos(phi)
-        # update phase at boundary for continuity
-        phase = (phase + two_pi * f * (sym_len / sample_rate)) % (2 * np.pi)
+        i0 = i * sym_len
+        f_inst[i0 : i0 + sym_len] = tone_freqs[i]
+    # Symmetric transition around each boundary
+    if L > 0:
+        for i in range(1, n_sym_total):
+            f0 = tone_freqs[i - 1]
+            f1 = tone_freqs[i]
+            b = i * sym_len
+            for j in range(-L, L):
+                t = b + j
+                if 0 <= t < active_len:
+                    u = (j + L + 0.5) / (2 * L)
+                    s = 0.5 * (1 - np.cos(np.pi * u))
+                    f_inst[t] = f0 + (f1 - f0) * s
+    # Integrate to phase and synthesize constant-envelope signal
+    dphi = two_pi * f_inst / sample_rate
+    phi = np.cumsum(dphi)
+    tone = np.cos(phi)
+    sig[start_idx : start_idx + active_len] = amplitude * tone
 
     return RealSamples(sig, sample_rate_in_hz=sample_rate)
