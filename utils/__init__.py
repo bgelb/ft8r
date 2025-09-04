@@ -6,6 +6,7 @@ from .decode import decode77, register_callsign, ihashcall
 
 from .ldpc_matrix import LDPC_174_91_H
 from .ft8_crc_matrix import CRC14_IDXS
+from .tx import generate_ft8_waveform
 
 # Order of tones forming the 7-symbol Costas sync sequence.  Each value
 # is the tone index (0-7) transmitted for one of the seven sync symbols.
@@ -120,4 +121,5 @@ __all__ = [
     "decode77",
     "register_callsign",
     "ihashcall",
+    "generate_ft8_waveform",
 ]
