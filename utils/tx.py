@@ -49,8 +49,6 @@ def generate_ft8_waveform(
     start_offset_sec: float = None,
     total_duration_sec: float = 15.0,
     amplitude: float = 1.0,
-    ramp_fraction: float = 0.5,
-    ramp_samples: int | None = None,
 ):
     """Synthesize a mono FT8 audio period containing a single transmission.
 
@@ -77,36 +75,48 @@ def generate_ft8_waveform(
     n_sym_total = FT8_SYMBOLS_PER_MESSAGE
     two_pi = 2.0 * np.pi
 
-    # Continuous-phase FSK with symmetric raised-cosine frequency transitions
+    # Exact WSJT-X ft8sim shaping: Gaussian-filtered frequency pulses (BT=2.0)
     active_len = n_sym_total * sym_len
-    # Ramp half-width in samples
-    if ramp_samples is None:
-        L = max(0, min(sym_len // 2, int(round(ramp_fraction * sym_len))))
-    else:
-        L = max(0, min(sym_len // 2, int(ramp_samples)))
-    # Build instantaneous frequency array
-    tone_freqs = [base_freq_hz + t * TONE_SPACING_IN_HZ for t in tones]
-    f_inst = np.empty(active_len, dtype=float)
-    # Start with step frequencies
-    for i in range(n_sym_total):
-        i0 = i * sym_len
-        f_inst[i0 : i0 + sym_len] = tone_freqs[i]
-    # Symmetric transition around each boundary
-    if L > 0:
-        for i in range(1, n_sym_total):
-            f0 = tone_freqs[i - 1]
-            f1 = tone_freqs[i]
-            b = i * sym_len
-            for j in range(-L, L):
-                t = b + j
-                if 0 <= t < active_len:
-                    u = (j + L + 0.5) / (2 * L)
-                    s = 0.5 * (1 - np.cos(np.pi * u))
-                    f_inst[t] = f0 + (f1 - f0) * s
-    # Integrate to phase and synthesize constant-envelope signal
-    dphi = two_pi * f_inst / sample_rate
-    phi = np.cumsum(dphi)
-    tone = np.cos(phi)
-    sig[start_idx : start_idx + active_len] = amplitude * tone
+    bt = 2.0
+    # Build Gaussian-filtered frequency pulse over 3 symbols (1-based indices in reference code)
+    t_idx = np.arange(1, 3 * sym_len + 1, dtype=float)
+    tt = (t_idx - 1.5 * sym_len) / float(sym_len)
+    c = np.pi * np.sqrt(2.0 / np.log(2.0))
+    # gfsk_pulse(b,t) = 0.5 * (erf(c*b*(t+0.5)) - erf(c*b*(t-0.5)))
+    from math import erf
+    pulse = 0.5 * (np.array([erf(c * bt * (u + 0.5)) - erf(c * bt * (u - 0.5)) for u in tt]))
+    # dphi array length (nsym+2)*nsps to allow edge extension
+    dphi = np.zeros((n_sym_total + 2) * sym_len, dtype=float)
+    dphi_peak = two_pi * 1.0 / float(sym_len)  # hmod=1.0
+    tones_arr = np.asarray(tones, dtype=float)
+    for j in range(n_sym_total):
+        ib = j * sym_len
+        dphi[ib : ib + 3 * sym_len] += dphi_peak * pulse * tones_arr[j]
+    # Dummy symbols at beginning and end
+    dphi[0 : 2 * sym_len] += dphi_peak * tones_arr[0] * pulse[sym_len : 3 * sym_len]
+    dphi[n_sym_total * sym_len : (n_sym_total + 2) * sym_len] += dphi_peak * tones_arr[-1] * pulse[0 : 2 * sym_len]
+    # Add carrier contribution
+    dphi += two_pi * base_freq_hz / sample_rate
+    # Generate nwave samples from indices [nsps, nsps + active_len)
+    nwave = active_len
+    phi = 0.0
+    wave = np.zeros(nwave, dtype=float)
+    start = sym_len
+    end = start + nwave
+    for k, j in enumerate(range(start, end), start=0):
+        wave[k] = np.sin(phi)
+        phi = (phi + dphi[j]) % two_pi
+    # Apply Hann ramps to first and last 1/8 symbol
+    nramp = int(round(sym_len / 8.0))
+    if nramp > 0:
+        n = np.arange(nramp)
+        wave[:nramp] *= 0.5 * (1.0 - np.cos(2.0 * np.pi * n / (2.0 * nramp)))
+        wave[-nramp:] *= 0.5 * (1.0 + np.cos(2.0 * np.pi * n / (2.0 * nramp)))
+    # Place into 15 s buffer then circularly shift by -nint((0.5 + xdt)/dt)
+    full_len = int(total_duration_sec * sample_rate)
+    buf = np.zeros(full_len, dtype=float)
+    buf[:nwave] = amplitude * wave
+    shift = -int(round((start_offset_sec) * sample_rate))
+    sig = np.roll(buf, shift)
 
     return RealSamples(sig, sample_rate_in_hz=sample_rate)
