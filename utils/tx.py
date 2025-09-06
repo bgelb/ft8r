@@ -99,13 +99,14 @@ def generate_ft8_waveform(
     dphi += two_pi * base_freq_hz / sample_rate
     # Generate nwave samples from indices [nsps, nsps + active_len)
     nwave = active_len
-    phi = 0.0
-    wave = np.zeros(nwave, dtype=float)
     start = sym_len
     end = start + nwave
-    for k, j in enumerate(range(start, end), start=0):
-        wave[k] = np.sin(phi)
-        phi = (phi + dphi[j]) % two_pi
+    seg_dphi = dphi[start:end]
+    # Phase before increment at each sample equals cumulative sum excluding current
+    phi_before = np.cumsum(seg_dphi) - seg_dphi
+    # Reduce modulo 2π to limit growth (stability); sin is invariant to 2π wraps
+    phi_before = np.remainder(phi_before, two_pi)
+    wave = np.sin(phi_before)
     # Apply Hann ramps to first and last 1/8 symbol
     nramp = int(round(sym_len / 8.0))
     if nramp > 0:
