@@ -11,15 +11,10 @@ def test_tx_generator_speed():
     msg = "CQ K1ABC FN31"
     bits = ft8code_bits(msg)
 
-    # Warm up caches
-    _ = generate_ft8_waveform(bits, sample_rate=12000, base_freq_hz=1500.0)
-
-    iters = 5
+    # Single deterministic run timing
     t0 = time.perf_counter()
-    for _ in range(iters):
-        _ = generate_ft8_waveform(bits, sample_rate=12000, base_freq_hz=1500.0)
-    dt = time.perf_counter() - t0
-    avg_ms = (dt / iters) * 1000.0
+    _ = generate_ft8_waveform(bits, sample_rate=12000, base_freq_hz=1500.0)
+    dt_ms = (time.perf_counter() - t0) * 1000.0
 
     # Expect well under 1 second per generation on typical hardware
-    assert avg_ms < 200.0, f"TX gen too slow: avg {avg_ms:.1f} ms over {iters} runs"
+    assert dt_ms < 200.0, f"TX gen too slow: {dt_ms:.1f} ms for single run"
