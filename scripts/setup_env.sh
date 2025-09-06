@@ -271,12 +271,21 @@ USAGE
       else
         log "System WSJT-X not found; falling back to local setup"
         log "Setting up WSJT-X $WSJTX_VERSION locally under $WSJTX_DIR"
-    case "$(os_name)" in
-      Darwin) setup_macos ;;
-      Linux) setup_linux ;;
-      *) echo "Unsupported OS: $(os_name)" >&2; exit 1 ;;
-    esac
-    log "Binaries (if available) are in $BIN_DIR"
+        case "$(os_name)" in
+          Darwin) setup_macos ;;
+          Linux) setup_linux ;;
+          *) echo "Unsupported OS: $(os_name)" >&2; exit 1 ;;
+        esac
+        log "Binaries (if available) are in $BIN_DIR"
+      fi
+    else
+      log "Setting up WSJT-X $WSJTX_VERSION locally under $WSJTX_DIR"
+      case "$(os_name)" in
+        Darwin) setup_macos ;;
+        Linux) setup_linux ;;
+        *) echo "Unsupported OS: $(os_name)" >&2; exit 1 ;;
+      esac
+      log "Binaries (if available) are in $BIN_DIR"
     fi
   else
     log "Skipping WSJT-X setup per --no-wsjt"
