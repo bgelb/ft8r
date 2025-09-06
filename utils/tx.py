@@ -1,43 +1,35 @@
 import numpy as np
+from math import erf, pi, sqrt, log
 
-# Inverse of demod.GRAY_MAP
-_GRAY_MAP = [
-    0b000,  # tone 0
-    0b001,  # tone 1
-    0b011,  # tone 2
-    0b010,  # tone 3
-    0b110,  # tone 4
-    0b100,  # tone 5
-    0b101,  # tone 6
-    0b111,  # tone 7
-]
+# Inverse of demod.GRAY_MAP (tone -> Gray code). We need the inverse to map
+# Gray-coded 3-bit payloads back to tone indices.
+_GRAY_MAP = [0b000, 0b001, 0b011, 0b010, 0b110, 0b100, 0b101, 0b111]
 _INV_GRAY = {code: tone for tone, code in enumerate(_GRAY_MAP)}
 
 
 def tones_from_bits(bits174: str) -> list[int]:
-    """Map a 174-bit FT8 codeword to 79 tone indices (0..7).
+    """Return 79 tone indices (0..7) for a 174-bit FT8 codeword.
 
-    - Costas sync tones at positions 0-6, 36-42, 72-78.
-    - Remaining 58 positions are payload: map consecutive 3-bit groups via inverse Gray code.
+    Positions 0–6, 36–42, 72–78 carry the Costas sync tones. The remaining 58
+    positions are the payload symbols, each derived from a 3‑bit Gray‑coded
+    chunk of the input bitstring.
     """
     if len(bits174) != 174:
         raise ValueError("bits174 must have length 174")
     # Local import to avoid circular dependency during utils package init
     from . import COSTAS_SEQUENCE, FT8_SYMBOLS_PER_MESSAGE
-    costas_pos = list(range(7)) + list(range(36, 43)) + list(range(72, 79))
-    tones = [0] * FT8_SYMBOLS_PER_MESSAGE
-    for i, p in enumerate(costas_pos):
-        tones[p] = COSTAS_SEQUENCE[i % 7]
-    # Fill payload symbols
-    payload_positions = [i for i in range(FT8_SYMBOLS_PER_MESSAGE) if i not in costas_pos]
-    assert len(payload_positions) == 58
+    costas_positions = list(range(7)) + list(range(36, 43)) + list(range(72, 79))
+    tones: list[int] = [0] * FT8_SYMBOLS_PER_MESSAGE
+
+    # Insert Costas sync tones
+    for i, pos in enumerate(costas_positions):
+        tones[pos] = COSTAS_SEQUENCE[i % 7]
+
+    # Fill payload symbols from 3‑bit Gray code chunks
+    payload_positions = [i for i in range(FT8_SYMBOLS_PER_MESSAGE) if i not in costas_positions]
     for k, pos in enumerate(payload_positions):
-        b3 = bits174[3 * k : 3 * k + 3]
-        val = int(b3, 2)
-        tone = _INV_GRAY.get(val)
-        if tone is None:
-            raise ValueError("invalid 3-bit Gray code")
-        tones[pos] = tone
+        payload_bits = bits174[3 * k : 3 * k + 3]
+        tones[pos] = _INV_GRAY[int(payload_bits, 2)]
     return tones
 
 
@@ -48,13 +40,14 @@ def generate_ft8_waveform(
     *,
     start_offset_sec: float = None,
     total_duration_sec: float = 15.0,
-    amplitude: float = 0.9,
+    amplitude: float = 1.0,
 ):
-    """Synthesize a mono FT8 audio period containing a single transmission.
+    """Generate a WSJT‑X‑compliant FT8 waveform for one 15 s period.
 
-    Generates 0.5 s of pre-gap by default, followed by 79 symbols of length
-    1/TONE_SPACING_IN_HZ with continuous phase, then trailing silence to reach
-    ``total_duration_sec``.
+    The implementation matches ft8sim (WSJT‑X) shaping exactly:
+    Gaussian‑filtered frequency pulses (BT=2.0), dummy symbols at the edges for
+    transition smoothing, and a contiguous 12.64 s transmission placed at
+    +0.5 s into a 15 s frame.
     """
     # Local import to avoid circulars
     from . import (
@@ -66,25 +59,50 @@ def generate_ft8_waveform(
     )
     if start_offset_sec is None:
         start_offset_sec = COSTAS_START_OFFSET_SEC
-    sym_len = int(round(sample_rate * FT8_SYMBOL_LENGTH_IN_SEC))
-    tones = tones_from_bits(bits174)
+    samples_per_symbol = int(round(sample_rate * FT8_SYMBOL_LENGTH_IN_SEC))
+    tone_indices = tones_from_bits(bits174)
 
-    # Time indices per symbol
-    sig = np.zeros(int(total_duration_sec * sample_rate), dtype=float)
+    # Build instantaneous phase increments over (NSYM+2)*NSPS samples
+    num_symbols = FT8_SYMBOLS_PER_MESSAGE
+    active_samples = num_symbols * samples_per_symbol
+    # Gaussian frequency pulse (BT=2.0)
+    time_idx = np.arange(1, 3 * samples_per_symbol + 1, dtype=float)
+    t_norm = (time_idx - 1.5 * samples_per_symbol) / float(samples_per_symbol)
+    const_c = pi * sqrt(2.0 / log(2.0))
+    pulse = 0.5 * (
+        np.array([erf(const_c * 2.0 * (u + 0.5)) - erf(const_c * 2.0 * (u - 0.5)) for u in t_norm])
+    )
+    dphi = np.zeros((num_symbols + 2) * samples_per_symbol, dtype=float)
+    dphi_peak = (2.0 * pi) / float(samples_per_symbol)  # hmod=1.0
+    tone_vals = np.asarray(tone_indices, dtype=float)
+    for s in range(num_symbols):
+        start = s * samples_per_symbol
+        dphi[start : start + 3 * samples_per_symbol] += dphi_peak * pulse * tone_vals[s]
+    # Dummy symbol smoothing at edges
+    dphi[0 : 2 * samples_per_symbol] += dphi_peak * tone_vals[0] * pulse[samples_per_symbol : 3 * samples_per_symbol]
+    tail = num_symbols * samples_per_symbol
+    dphi[tail : tail + 2 * samples_per_symbol] += dphi_peak * tone_vals[-1] * pulse[0 : 2 * samples_per_symbol]
+    # Carrier increment
+    dphi += (2.0 * pi * base_freq_hz) / float(sample_rate)
+
+    # Vectorized phase synthesis over the active span (exclude initial dummy)
+    start = samples_per_symbol
+    seg_dphi = dphi[start : start + active_samples]
+    phase_before = np.cumsum(seg_dphi) - seg_dphi
+    phase_before = np.remainder(phase_before, 2.0 * pi)
+    wave = np.sin(phase_before)
+
+    # Apply gentle Hann ramps over first/last 1/8 symbol
+    ramp = int(round(samples_per_symbol / 8.0))
+    if ramp > 0:
+        ramp_idx = np.arange(ramp)
+        wave[:ramp] *= 0.5 * (1.0 - np.cos(2.0 * pi * ramp_idx / (2.0 * ramp)))
+        wave[-ramp:] *= 0.5 * (1.0 + np.cos(2.0 * pi * ramp_idx / (2.0 * ramp)))
+
+    # Place waveform at +0.5 s in a 15 s frame (no wrap)
+    frame_len = int(total_duration_sec * sample_rate)
+    sig = np.zeros(frame_len, dtype=float)
     start_idx = int(round(start_offset_sec * sample_rate))
-    n_sym_total = FT8_SYMBOLS_PER_MESSAGE
-    phase = 0.0
-    two_pi = 2.0 * np.pi
-
-    for i in range(n_sym_total):
-        f = base_freq_hz + tones[i] * TONE_SPACING_IN_HZ
-        n0 = start_idx + i * sym_len
-        n1 = n0 + sym_len
-        t = (np.arange(sym_len) / sample_rate)
-        # continuous-phase tone for this symbol starting at accumulated phase
-        phi = phase + two_pi * f * t
-        sig[n0:n1] = amplitude * np.cos(phi)
-        # update phase at boundary for continuity
-        phase = (phase + two_pi * f * (sym_len / sample_rate)) % (2 * np.pi)
+    sig[start_idx : start_idx + active_samples] = amplitude * wave
 
     return RealSamples(sig, sample_rate_in_hz=sample_rate)
