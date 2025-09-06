@@ -27,11 +27,18 @@ jobs:
       - name: Ensure required system tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y rsync unzip jq
+          sudo apt-get install -y rsync unzip jq wsjtx
 
       - name: Run setup and tests (verbose)
         run: |
-          bash scripts/setup_env.sh --test
+          bash scripts/setup_env.sh --prefer-system-wsjt --test
+
+      - name: Verify ft8sim present (CI mandatory)
+        run: |
+          if ! command -v /usr/bin/ft8sim >/dev/null 2>&1; then
+            echo 'ft8sim not found in /usr/bin; ensure wsjtx package includes ft8sim' >&2
+            exit 2
+          fi
 
       - name: Read short regression metrics
         if: always()

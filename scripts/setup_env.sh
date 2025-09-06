@@ -234,10 +234,11 @@ clean_all() {
 }
 
 main() {
-  local do_clean=0 do_wsjt=1 do_python=1 do_samples=1 do_test=0
+  local do_clean=0 do_wsjt=1 do_python=1 do_samples=1 do_test=0 prefer_system=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --clean) do_clean=1 ;;
+      --prefer-system-wsjt) prefer_system=1 ;;
       --no-wsjt) do_wsjt=0 ;;
       --no-python) do_python=0 ;;
       --no-samples) do_samples=0 ;;
@@ -263,13 +264,20 @@ USAGE
   [[ $do_clean -eq 1 ]] && clean_all
 
   if [[ $do_wsjt -eq 1 ]]; then
-    log "Setting up WSJT-X $WSJTX_VERSION locally under $WSJTX_DIR"
+    if [[ $prefer_system -eq 1 && "$(os_name)" == Linux ]]; then
+      if [[ -x "/usr/bin/ft8code" || -x "/usr/bin/jt9" || -x "/usr/bin/ft8sim" ]]; then
+        BIN_DIR="/usr/bin"
+        log "Using system WSJT-X binaries from $BIN_DIR (--prefer-system-wsjt)"
+      else
+        log "System WSJT-X not found; falling back to local setup"
+        log "Setting up WSJT-X $WSJTX_VERSION locally under $WSJTX_DIR"
     case "$(os_name)" in
       Darwin) setup_macos ;;
       Linux) setup_linux ;;
       *) echo "Unsupported OS: $(os_name)" >&2; exit 1 ;;
     esac
     log "Binaries (if available) are in $BIN_DIR"
+    fi
   else
     log "Skipping WSJT-X setup per --no-wsjt"
   fi
