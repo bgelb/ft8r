@@ -115,9 +115,9 @@ def generate_ft8_waveform(
         wave[-nramp:] *= 0.5 * (1.0 + np.cos(2.0 * np.pi * n / (2.0 * nramp)))
     # Place into 15 s buffer then circularly shift by -nint((0.5 + xdt)/dt)
     full_len = int(total_duration_sec * sample_rate)
-    buf = np.zeros(full_len, dtype=float)
-    buf[:nwave] = amplitude * wave
-    shift = -int(round((start_offset_sec) * sample_rate))
-    sig = np.roll(buf, shift)
+    sig = np.zeros(full_len, dtype=float)
+    start_idx = int(round(start_offset_sec * sample_rate))
+    end_idx = start_idx + nwave
+    sig[start_idx:end_idx] = amplitude * wave
 
     return RealSamples(sig, sample_rate_in_hz=sample_rate)
