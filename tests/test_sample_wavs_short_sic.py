@@ -60,13 +60,22 @@ def test_decode_sample_wavs_short_multipass_sic():
         acc.update(decoded_per_pass[p])
         cumulative_maps.append(dict(acc))
 
-    def _rate(dct: dict[str, str]) -> float:
+    def _rate(dct: dict[str, str]) -> tuple[float, float]:
+        total = len(dct)
         correct = sum(1 for txt in dct.values() if txt in expected_set)
-        return (correct / len(expected_set)) if expected_set else 0.0
+        decode_rate = (correct / len(expected_set)) if expected_set else 0.0
+        false_rate = ((total - correct) / total) if total else 0.0
+        return decode_rate, false_rate
 
-    pass1 = _rate(cumulative_maps[0])
-    pass2 = _rate(cumulative_maps[1])
-    pass3 = _rate(cumulative_maps[2])
+    pass1, fdr1 = _rate(cumulative_maps[0])
+    pass2, fdr2 = _rate(cumulative_maps[1])
+    pass3, fdr3 = _rate(cumulative_maps[2])
+
+    uniq1 = len(cumulative_maps[0])
+    uniq2 = len(cumulative_maps[1])
+    uniq3 = len(cumulative_maps[2])
+    gain_p2 = uniq2 - uniq1
+    gain_p3 = uniq3 - uniq2
 
     print(
         f"Short SIC metrics: pass1={pass1:.3f} pass2={pass2:.3f} pass3={pass3:.3f}"
@@ -95,6 +104,11 @@ def test_decode_sample_wavs_short_multipass_sic():
                     "pass1": float(pass1),
                     "pass2": float(pass2),
                     "pass3": float(pass3),
+                    "false1": float(fdr1),
+                    "false2": float(fdr2),
+                    "false3": float(fdr3),
+                    "uniq_gain_p2": int(gain_p2),
+                    "uniq_gain_p3": int(gain_p3),
                     "duration_sec": float(duration_sec),
                 },
                 f,
