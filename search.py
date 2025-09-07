@@ -232,13 +232,22 @@ def peak_candidates(
     threshold: float,
 ) -> List[Tuple[float, float, float]]:
     """Return local maxima from ``scores`` above ``threshold``."""
-
-    # Max value including the center.
-    neighborhood = np.ones((3, 3), dtype=bool)
+    # Configurable non-maximum suppression radii (half-widths)
+    dt_half = max(0, _env_int("FT8R_COARSE_NMS_DT_HALF", 1))
+    df_half = max(0, _env_int("FT8R_COARSE_NMS_DF_HALF", 0))
+    H, W = scores.shape
+    # Build footprint including the center for full max
+    neighborhood = np.zeros((2 * dt_half + 1, 2 * df_half + 1), dtype=bool)
+    neighborhood[:, :] = True if neighborhood.size else np.array([[True]], dtype=bool)
     with PROFILER.section("search.max_full"):
         max_full = maximum_filter(scores, footprint=neighborhood, mode="constant", cval=-np.inf)
-    # Max value of neighbors excluding the center element.
-    neighbor_foot = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=bool)
+    # Neighbor footprint excludes center
+    neighbor_foot = neighborhood.copy()
+    # Ensure neighbor_foot has a defined center to zero out
+    ci = dt_half
+    cj = df_half
+    if neighbor_foot.size:
+        neighbor_foot[ci, cj] = False
     with PROFILER.section("search.max_neighbors"):
         max_neighbors = maximum_filter(scores, footprint=neighbor_foot, mode="constant", cval=-np.inf)
 
@@ -292,12 +301,13 @@ def budget_tile_candidates(
     h, w = scores.shape
     td = max(1, _env_int("FT8R_COARSE_ADAPTIVE_TILE_DT", 8))
     tf = max(1, _env_int("FT8R_COARSE_ADAPTIVE_TILE_FREQ", 4))
-    k = max(1, _env_int("FT8R_COARSE_ADAPTIVE_PER_TILE_K", 2))
+    k = max(1, _env_int("FT8R_COARSE_ADAPTIVE_PER_TILE_K", 3))
     t_min = _env_float("FT8R_COARSE_ADAPTIVE_THRESH_MIN", 0.7)
     q_start = _env_float("FT8R_COARSE_ADAPTIVE_Q_START", 0.98)
     q_min = _env_float("FT8R_COARSE_ADAPTIVE_Q_MIN", 0.80)
     q_step = _env_float("FT8R_COARSE_ADAPTIVE_Q_STEP", 0.05)
 
+    # Keep base threshold as a hard floor to avoid false positives in noise.
     T_fixed = max(base_threshold, t_min)
 
     # Prepare per-tile sorted scores and coordinates
