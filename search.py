@@ -275,101 +275,30 @@ def budget_tile_candidates(
     *,
     budget: int,
 ) -> List[Tuple[float, float, float]]:
-    """Adaptive per-tile thresholding with efficient quantile sweep.
+    """Back-to-basics: global Top-K by score with threshold gating.
 
-    Functionally mirrors the original quantile-lowering loop but avoids
-    recomputing quantiles and rescanning entries multiple times. For each tile
-    we maintain a pointer into its descending score list and advance it as the
-    joint threshold is lowered from q_start to q_min. A global 3x3 suppression
-    mask enforces separation, and at most ``k`` entries are accepted per tile.
+    Ignores per-tile budgeting, NMS, and adaptive quantiles. This serves as a
+    simplified baseline selector to evaluate upper-bound coarse recall without
+    specialized suppression.
     """
+    if budget <= 0:
+        budget = scores.size
+    mask = scores >= base_threshold
+    idxs = np.nonzero(mask.ravel())[0]
+    if idxs.size == 0:
+        return []
+    flat = scores.ravel()
+    if budget < idxs.size:
+        part = idxs[np.argpartition(flat[idxs], -budget)[-budget:]]
+        order = part[np.argsort(flat[part])[::-1]]
+    else:
+        order = idxs[np.argsort(flat[idxs])[::-1]]
     h, w = scores.shape
-    td = max(1, _env_int("FT8R_COARSE_ADAPTIVE_TILE_DT", 8))
-    tf = max(1, _env_int("FT8R_COARSE_ADAPTIVE_TILE_FREQ", 4))
-    k = max(1, _env_int("FT8R_COARSE_ADAPTIVE_PER_TILE_K", 3))
-    t_min = _env_float("FT8R_COARSE_ADAPTIVE_THRESH_MIN", 0.7)
-    q_start = _env_float("FT8R_COARSE_ADAPTIVE_Q_START", 0.98)
-    q_min = _env_float("FT8R_COARSE_ADAPTIVE_Q_MIN", 0.80)
-    q_step = _env_float("FT8R_COARSE_ADAPTIVE_Q_STEP", 0.05)
-
-    # Keep base threshold as a hard floor to avoid false positives in noise.
-    T_fixed = max(base_threshold, t_min)
-
-    # Prepare per-tile sorted scores and coordinates
-    tiles = []
-    for i0 in range(0, h, td):
-        i1 = min(i0 + td, h)
-        for j0 in range(0, w, tf):
-            j1 = min(j0 + tf, w)
-            block = scores[i0:i1, j0:j1]
-            if block.size == 0:
-                continue
-            flat = block.ravel()
-            order = np.argsort(flat)[::-1]
-            s_desc = flat[order]
-            # Coordinates for each entry in s_desc
-            width = (j1 - j0)
-            di = order // width
-            dj = order % width
-            is_arr = i0 + di
-            js_arr = j0 + dj
-            neg_s = -s_desc  # for searchsorted on ascending
-            tiles.append({
-                "s": s_desc,
-                "neg": neg_s,
-                "is": is_arr,
-                "js": js_arr,
-                "ptr": 0,
-                "taken": 0,
-            })
-
-    selected_mask = np.zeros_like(scores, dtype=bool)
-    # Mirror NMS footprint used in peak_candidates for production path
-    nms_dt_half = max(0, _env_int("FT8R_COARSE_NMS_DT_HALF", 1))
-    nms_df_half = max(0, _env_int("FT8R_COARSE_NMS_DF_HALF", 0))
-    results: List[Tuple[float, float, float]] = []
-
-    def count_ge(tile, thr_val: float) -> int:
-        # number of entries with s >= thr_val using -s ascending
-        return int(np.searchsorted(tile["neg"], -thr_val, side="right"))
-
-    q = q_start
-    while q >= q_min and len(results) < budget:
-        for tile in tiles:
-            if tile["taken"] >= k or len(results) >= budget:
-                continue
-            s_desc = tile["s"]
-            n = s_desc.shape[0]
-            if n == 0:
-                continue
-            # Quantile threshold from the tile's own distribution
-            asc_idx = int(np.floor(q * (n - 1)))
-            # value at quantile q of ascending array equals s_desc[n-1-asc_idx]
-            q_th = float(s_desc[n - 1 - asc_idx])
-            T_tile = max(T_fixed, q_th)
-            limit = min(n, count_ge(tile, T_tile))
-            # Admit new entries between ptr and limit
-            ptr = tile["ptr"]
-            while ptr < limit and tile["taken"] < k and len(results) < budget:
-                i = int(tile["is"][ptr])
-                j = int(tile["js"][ptr])
-                s = float(s_desc[ptr])
-                # Enforce global non-overlap with configurable half-widths
-                if not selected_mask[i, j]:
-                    ii0 = max(0, i - nms_dt_half)
-                    ii1 = min(h, i + nms_dt_half + 1)
-                    jj0 = max(0, j - nms_df_half)
-                    jj1 = min(w, j + nms_df_half + 1)
-                    if not selected_mask[ii0:ii1, jj0:jj1].any():
-                        selected_mask[i, j] = True
-                        tile["taken"] += 1
-                        results.append((s, float(dts[i]), float(freqs[j])))
-                ptr += 1
-            tile["ptr"] = ptr
-        q -= q_step
-
-    results.sort(reverse=True)
-    return results
+    out: List[Tuple[float, float, float]] = []
+    for idx in order:
+        i = int(idx // w); j = int(idx % w)
+        out.append((float(scores[i, j]), float(dts[i]), float(freqs[j])))
+    return out
 
 def find_candidates(
     samples_in: RealSamples,
