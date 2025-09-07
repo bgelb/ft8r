@@ -19,6 +19,7 @@ from utils import (
 
 from search import find_candidates
 from utils.prof import PROFILER
+from utils.tx import tones_from_bits
 import os
 
 # Symbol positions occupied by the three 7-symbol Costas sequences.
@@ -602,3 +603,130 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
             pass
 
     return _dedup_decodes(results)
+
+
+def _estimate_symbol_phases(
+    samples_in: RealSamples,
+    dt: float,
+    freq: float,
+    bits174: str,
+    *,
+    precomputed_fft: tuple | None = None,
+) -> list[float]:
+    """Return per-symbol phase estimates (radians) for the decoded tones.
+
+    Computes a finely aligned baseband segment for the given ``dt``/``freq``,
+    then, for each symbol, measures the complex correlation against the
+    expected tone and returns the angle as a constant phase offset.
+    """
+    bb, _dt, _freq = fine_sync_candidate(samples_in, freq, dt, precomputed_fft=precomputed_fft)
+    sym_len = _symbol_samples(bb.sample_rate_in_hz)
+    seg = _symbol_matrix(bb.samples, 0, sym_len)
+    bases = _zero_offset_bases(bb.sample_rate_in_hz, sym_len)  # (8, sym_len)
+    tones = tones_from_bits(bits174)
+    phases: list[float] = []
+    for i, t in enumerate(tones):
+        # Complex projection onto tone basis for this symbol
+        z = np.vdot(bases[int(t)], seg[i])  # conj(basis) @ segment
+        phases.append(float(np.angle(z)))
+    return phases
+
+
+def decode_full_period_multipass(
+    samples_in: RealSamples,
+    threshold: float = 1.0,
+    *,
+    passes: int = 3,
+    sic_scale: float = 0.7,
+    sic_use_phase: bool = True,
+    include_bits: bool = False,
+    return_pass_records: bool = False,
+    return_residuals: bool = False,
+):
+    """Run multi-pass SIC decoding and return all decodes tagged by pass.
+
+    Each pass decodes with :func:`decode_full_period`, synthesizes clean
+    waveforms per successful decode (with per-symbol phase correction), scales
+    by ``sic_scale``, subtracts from the input, and proceeds to the next pass.
+
+    Returns a list of decode dicts with an added key ``pass`` (1-based).
+    """
+    # Work on a residual copy of the original audio
+    residual = np.copy(samples_in.samples)
+    sample_rate = samples_in.sample_rate_in_hz
+    all_records: list[dict] = []
+    per_pass: list[list[dict]] = []
+    residual_snaps: list[RealSamples] = []
+    for p in range(1, max(1, int(passes)) + 1):
+        cur = RealSamples(residual, sample_rate)
+        recs = decode_full_period(cur, threshold=threshold, include_bits=True)
+        # Tag with pass index and optionally strip bits later if requested
+        for r in recs:
+            r["pass"] = p
+        all_records.extend(recs)
+        per_pass.append(recs)
+
+        if p == passes or not recs:
+            # No subtraction snapshot recorded for the final pass or empty pass
+            continue
+        # Prepare FFT once for all phase estimates in this pass
+        pre_fft = _prepare_full_fft(cur)
+        # Subtract synthesized waveforms from residual
+        from utils.tx import generate_ft8_waveform
+        from utils import COSTAS_START_OFFSET_SEC
+        for r in recs:
+            bits = r.get("bits")
+            if not bits or len(bits) != 174:
+                continue
+            dt_f = float(r.get("dt", 0.0))
+            fq_f = float(r.get("freq", 0.0))
+            phases = None
+            if sic_use_phase:
+                try:
+                    phases = _estimate_symbol_phases(cur, dt_f, fq_f, bits, precomputed_fft=pre_fft)
+                except Exception:
+                    phases = None
+            try:
+                synth = generate_ft8_waveform(
+                    bits,
+                    sample_rate=sample_rate,
+                    base_freq_hz=fq_f,
+                    start_offset_sec=COSTAS_START_OFFSET_SEC + dt_f,
+                    total_duration_sec=15.0,
+                    amplitude=float(sic_scale),
+                    per_symbol_phase=phases,
+                )
+            except Exception:
+                # Fallback: no per-symbol phase
+                synth = generate_ft8_waveform(
+                    bits,
+                    sample_rate=sample_rate,
+                    base_freq_hz=fq_f,
+                    start_offset_sec=COSTAS_START_OFFSET_SEC + dt_f,
+                    total_duration_sec=15.0,
+                    amplitude=float(sic_scale),
+                )
+            # Subtract in-place
+            n = min(len(residual), len(synth.samples))
+            residual[:n] = residual[:n] - synth.samples[:n]
+        if return_residuals:
+            residual_snaps.append(RealSamples(np.copy(residual), sample_rate))
+
+    # Dedupe across passes while keeping the earliest pass occurrence
+    all_records.sort(key=lambda r: (r.get("pass", 1), -float(r.get("score", 0.0))))
+    deduped = _dedup_decodes(all_records)
+    # Optionally drop bits from the returned copy only (avoid mutating per_pass)
+    if not include_bits:
+        deduped_out = []
+        for r in deduped:
+            c = dict(r)
+            c.pop("bits", None)
+            deduped_out.append(c)
+    else:
+        deduped_out = deduped
+    if return_pass_records or return_residuals:
+        out = {"per_pass": per_pass, "all": deduped_out}
+        if return_residuals:
+            out["residuals"] = residual_snaps
+        return out
+    return deduped_out

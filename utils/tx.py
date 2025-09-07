@@ -41,6 +41,7 @@ def generate_ft8_waveform(
     start_offset_sec: float = None,
     total_duration_sec: float = 15.0,
     amplitude: float = 1.0,
+    per_symbol_phase: list[float] | None = None,
 ):
     """Generate a WSJT‑X‑compliant FT8 waveform for one 15 s period.
 
@@ -90,6 +91,17 @@ def generate_ft8_waveform(
     seg_dphi = dphi[start : start + active_samples]
     phase_before = np.cumsum(seg_dphi) - seg_dphi
     phase_before = np.remainder(phase_before, 2.0 * pi)
+    # Apply optional per-symbol constant phase offsets after phase integration
+    if per_symbol_phase is not None:
+        if len(per_symbol_phase) != FT8_SYMBOLS_PER_MESSAGE:
+            raise ValueError("per_symbol_phase must have length 79 (symbols)")
+        phase_before = phase_before.copy()
+        for i in range(FT8_SYMBOLS_PER_MESSAGE):
+            if per_symbol_phase[i] == 0.0:
+                continue
+            i0 = i * samples_per_symbol
+            i1 = i0 + samples_per_symbol
+            phase_before[i0:i1] += float(per_symbol_phase[i])
     wave = np.sin(phase_before)
 
     # Apply gentle Hann ramps over first/last 1/8 symbol
