@@ -11,6 +11,11 @@ from utils import (
 )
 from utils.prof import PROFILER
 
+# Default global cap for runtime candidate count (tunable via env).
+# Empirically chosen from candidate distributions across bundled samples
+# (p99≈1244, max≈1260) with headroom.
+DEFAULT_MAX_CANDIDATES = 1500
+
 
 def _costas_active_noise_maps(fft_pwr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return (active_map, noise_map) for the Costas correlation.
@@ -225,41 +230,7 @@ def candidate_score_map(
 import os
 
 
-def peak_candidates(
-    scores: np.ndarray,
-    dts: np.ndarray,
-    freqs: np.ndarray,
-    threshold: float,
-) -> List[Tuple[float, float, float]]:
-    """Return local maxima from ``scores`` above ``threshold``."""
-    # Configurable non-maximum suppression radii (half-widths)
-    dt_half = max(0, _env_int("FT8R_COARSE_NMS_DT_HALF", 1))
-    df_half = max(0, _env_int("FT8R_COARSE_NMS_DF_HALF", 0))
-    H, W = scores.shape
-    # Build footprint including the center for full max
-    neighborhood = np.zeros((2 * dt_half + 1, 2 * df_half + 1), dtype=bool)
-    neighborhood[:, :] = True if neighborhood.size else np.array([[True]], dtype=bool)
-    with PROFILER.section("search.max_full"):
-        max_full = maximum_filter(scores, footprint=neighborhood, mode="constant", cval=-np.inf)
-    # Neighbor footprint excludes center
-    neighbor_foot = neighborhood.copy()
-    # Ensure neighbor_foot has a defined center to zero out
-    ci = dt_half
-    cj = df_half
-    if neighbor_foot.size:
-        neighbor_foot[ci, cj] = False
-    with PROFILER.section("search.max_neighbors"):
-        max_neighbors = maximum_filter(scores, footprint=neighbor_foot, mode="constant", cval=-np.inf)
-
-    mask = (scores >= threshold) & (scores == max_full) & (scores > max_neighbors)
-    with PROFILER.section("search.nonzero"):
-        dt_idx, freq_idx = np.nonzero(mask)
-    results = [
-        (float(scores[i, j]), float(dts[i]), float(freqs[j]))
-        for i, j in zip(dt_idx, freq_idx)
-    ]
-    results.sort(reverse=True)
-    return results
+    
 
 
 def _env_int(name: str, default: int) -> int:
@@ -277,6 +248,20 @@ def _env_float(name: str, default: float) -> float:
         return float(os.getenv(name, str(default)))
     except Exception:
         return default
+
+
+def default_candidate_budget() -> int:
+    """Return the default candidate budget honoring ``FT8R_MAX_CANDIDATES``.
+
+    ``0`` or negatives are treated as uncapped and map to ``DEFAULT_MAX_CANDIDATES``
+    for safety in production paths; callers who truly need uncapped should pass
+    an explicit large budget derived from their grid size.
+    """
+    try:
+        b = int(os.getenv("FT8R_MAX_CANDIDATES", str(DEFAULT_MAX_CANDIDATES)))
+    except Exception:
+        b = DEFAULT_MAX_CANDIDATES
+    return DEFAULT_MAX_CANDIDATES if b <= 0 else b
 
 
  
@@ -339,6 +324,9 @@ def budget_tile_candidates(
             })
 
     selected_mask = np.zeros_like(scores, dtype=bool)
+    # Mirror NMS footprint used in peak_candidates for production path
+    nms_dt_half = max(0, _env_int("FT8R_COARSE_NMS_DT_HALF", 1))
+    nms_df_half = max(0, _env_int("FT8R_COARSE_NMS_DF_HALF", 0))
     results: List[Tuple[float, float, float]] = []
 
     def count_ge(tile, thr_val: float) -> int:
@@ -366,12 +354,12 @@ def budget_tile_candidates(
                 i = int(tile["is"][ptr])
                 j = int(tile["js"][ptr])
                 s = float(s_desc[ptr])
-                # Enforce global 3x3 non-overlap
+                # Enforce global non-overlap with configurable half-widths
                 if not selected_mask[i, j]:
-                    ii0 = max(0, i - 1)
-                    ii1 = min(h, i + 2)
-                    jj0 = max(0, j - 1)
-                    jj1 = min(w, j + 2)
+                    ii0 = max(0, i - nms_dt_half)
+                    ii1 = min(h, i + nms_dt_half + 1)
+                    jj0 = max(0, j - nms_df_half)
+                    jj1 = min(w, j + nms_df_half + 1)
                     if not selected_mask[ii0:ii1, jj0:jj1].any():
                         selected_mask[i, j] = True
                         tile["taken"] += 1
@@ -427,8 +415,5 @@ def find_candidates(
     )
 
     # Always use budgeted per-tile selection to control candidate counts
-    try:
-        B = int(os.getenv("FT8R_MAX_CANDIDATES", "1500"))
-    except Exception:
-        B = 1500
-    return budget_tile_candidates(scores, dts, freqs, threshold, budget=B if B > 0 else 1500)
+    B = default_candidate_budget()
+    return budget_tile_candidates(scores, dts, freqs, threshold, budget=B)

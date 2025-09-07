@@ -1,4 +1,4 @@
-from search import find_candidates, candidate_score_map, peak_candidates
+from search import find_candidates, candidate_score_map, budget_tile_candidates, default_candidate_budget
 import numpy as np
 import os
 from utils import (
@@ -104,7 +104,7 @@ def test_candidate_peak_filter(tmp_path):
     num_above = np.count_nonzero(scores >= thresh)
     assert num_above > 1
 
-    peaks = peak_candidates(scores, dts, freqs, threshold=thresh)
+    peaks = budget_tile_candidates(scores, dts, freqs, base_threshold=thresh, budget=default_candidate_budget())
 
     assert 0 < len(peaks) < num_above
     score, dt, freq = peaks[0]

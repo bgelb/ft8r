@@ -189,7 +189,8 @@ def _load_strategy(path: Path) -> Strategy:
 def cmd_run(wav_root: Path, out_dir: Path, strategy_path: Path, limit: int) -> int:
     from utils import read_wav
     from tests.utils import default_search_params
-    from search import candidate_score_map, peak_candidates
+    from search import candidate_score_map, budget_tile_candidates
+    import os
 
     strat = _load_strategy(strategy_path)
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -206,6 +207,11 @@ def cmd_run(wav_root: Path, out_dir: Path, strategy_path: Path, limit: int) -> i
         w = csv.writer(f)
         w.writerow(["wav_stem", "t_coarse", "f_coarse", "score", "rank"])
 
+        # Wire NMS radii into the search via environment so peak_candidates uses them
+        prev_dt = os.environ.get("FT8R_COARSE_NMS_DT_HALF")
+        prev_df = os.environ.get("FT8R_COARSE_NMS_DF_HALF")
+        os.environ["FT8R_COARSE_NMS_DT_HALF"] = str(max(0, int(strat.nms_radius_dt)))
+        os.environ["FT8R_COARSE_NMS_DF_HALF"] = str(max(0, int(strat.nms_radius_df)))
         count = 0
         for wav in _iter_wavs(wav_root):
             audio = read_wav(str(wav))
@@ -215,7 +221,9 @@ def cmd_run(wav_root: Path, out_dir: Path, strategy_path: Path, limit: int) -> i
             # NMS radius with simple local suppression by changing the footprint size
             # We reuse peak_candidates but with a custom threshold; radius is handled by
             # multiple maximum_filter passes if needed.
-            peaks = peak_candidates(scores, dts, freqs, threshold=strat.threshold)
+            # Map strategy cap into budget; 0 means uncapped -> large budget
+            B = strat.candidate_cap if strat.candidate_cap and strat.candidate_cap > 0 else (scores.size)
+            peaks = budget_tile_candidates(scores, dts, freqs, base_threshold=strat.threshold, budget=B)
             if strat.candidate_cap:
                 peaks = peaks[: strat.candidate_cap]
 
@@ -226,6 +234,16 @@ def cmd_run(wav_root: Path, out_dir: Path, strategy_path: Path, limit: int) -> i
             count += 1
             if limit and count >= limit:
                 break
+
+        # Restore previous env
+        if prev_dt is None:
+            os.environ.pop("FT8R_COARSE_NMS_DT_HALF", None)
+        else:
+            os.environ["FT8R_COARSE_NMS_DT_HALF"] = prev_dt
+        if prev_df is None:
+            os.environ.pop("FT8R_COARSE_NMS_DF_HALF", None)
+        else:
+            os.environ["FT8R_COARSE_NMS_DF_HALF"] = prev_df
 
     return 0
 
