@@ -18,6 +18,7 @@ from utils import (
 )
 
 from search import find_candidates
+from search import candidate_score_map
 from utils.prof import PROFILER
 import os
 
@@ -510,9 +511,120 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
     max_dt_symbols = -(-max_dt_samples // sym_len)
 
     with PROFILER.section("search.find_candidates"):
-        candidates = find_candidates(
-            samples_in, max_freq_bin, max_dt_symbols, threshold=threshold
-        )
+        candidates = find_candidates(samples_in, max_freq_bin, max_dt_symbols, threshold=threshold)
+
+    # Optional FEC-guided promotion of near-threshold seeds
+    if os.getenv("FT8R_COARSE_FEC_ENABLE", "0") not in ("0", "", "false", "False"):
+        try:
+            max_promos = int(os.getenv("FT8R_COARSE_FEC_MAX_PROMOTIONS", "100"))
+            band_hz = float(os.getenv("FT8R_COARSE_FEC_BAND_HZ", "100.0"))
+            mu_min = float(os.getenv("FT8R_COARSE_FEC_MU_MIN", "0.40"))
+            unsat_max = int(os.getenv("FT8R_COARSE_FEC_UNSAT_MAX", "25"))
+            alpha = float(os.getenv("FT8R_COARSE_FEC_ALPHA", "1.0"))
+            beta = float(os.getenv("FT8R_COARSE_FEC_BETA", "1.0"))
+            gamma = float(os.getenv("FT8R_COARSE_FEC_GAMMA", "1.0"))
+        except Exception:
+            max_promos, band_hz, mu_min, unsat_max, alpha, beta, gamma = 100, 100.0, 0.40, 25, 1.0, 1.0, 1.0
+
+        with PROFILER.section("search.candidate_score_map"):
+            scores, dts_arr, freqs_arr = candidate_score_map(samples_in, max_freq_bin, max_dt_symbols)
+        # Build a quick index of already-selected bands
+        band_bins = max(1, int(round(band_hz / TONE_SPACING_IN_HZ)))
+        # Mark bands with existing candidates
+        picked_cols = set()
+        def _nearest_idx(val, arr):
+            import numpy as _np
+            return int(_np.argmin(_np.abs(arr - val)))
+        for _s, dt0, fq0 in candidates:
+            jj = _nearest_idx(fq0, freqs_arr)
+            picked_cols.add(jj // band_bins)
+        promos = []
+        # Find best local max per empty band in near-threshold region
+        import numpy as _np
+        H, W = scores.shape
+        dt_half = 1; df_half = 1
+        # local mask: center larger than neighbors
+        for b in range(0, W, band_bins):
+            band_id = b // band_bins
+            if band_id in picked_cols:
+                continue
+            j0, j1 = b, min(W, b + band_bins)
+            block = scores[:, j0:j1]
+            if block.size == 0:
+                continue
+            # compute local maxima within band
+            from scipy.ndimage import maximum_filter
+            neigh = _np.ones((2*dt_half+1, 2*df_half+1), dtype=bool)
+            max_full = maximum_filter(block, footprint=neigh, mode="constant", cval=-_np.inf)
+            neigh_center = neigh.copy(); neigh_center[dt_half, df_half] = False
+            max_nei = maximum_filter(block, footprint=neigh_center, mode="constant", cval=-_np.inf)
+            mask = (block >= (0.8 * threshold)) & (block < threshold) & (block == max_full) & (block > max_nei)
+            if not mask.any():
+                # fall back to absolute best in band if above minimal floor (t_min)
+                idx = int(_np.argmax(block))
+                bi = idx // (j1 - j0); bj = idx % (j1 - j0)
+                s = float(block[bi, bj])
+                if s >= threshold:
+                    continue
+                cand = (s, float(dts_arr[bi]), float(freqs_arr[j0 + bj]))
+                promos.append(cand)
+            else:
+                # choose best among local maxima
+                ii, jj = _np.nonzero(mask)
+                best = None; best_s = -1.0
+                for bi, bj in zip(ii, jj):
+                    s = float(block[bi, bj])
+                    if s > best_s:
+                        best_s = s; best = (bi, bj)
+                if best is not None:
+                    bi, bj = best
+                    promos.append((float(block[bi, bj]), float(dts_arr[bi]), float(freqs_arr[j0 + bj])))
+            if len(promos) >= max_promos:
+                break
+
+        # FEC probe and filter promotions
+        def _fec_probe(dt, fq):
+            # Downsample & soft demod over a quick refined window
+            try:
+                bb = downsample_to_baseband(samples_in, fq)
+                # fine time around dt, small search
+                dt_f = fine_time_sync(bb, dt, 2)
+                bb2 = downsample_to_baseband(samples_in, fq)
+                sym_len = _symbol_samples(bb2.sample_rate_in_hz)
+                start = int(round((dt_f + COSTAS_START_OFFSET_SEC) * bb2.sample_rate_in_hz))
+                end = start + sym_len * FT8_SYMBOLS_PER_MESSAGE
+                if start < 0 or end > len(bb2.samples):
+                    return None
+                trimmed = ComplexSamples(bb2.samples[start:end], bb2.sample_rate_in_hz)
+                llrs = soft_demod(trimmed)
+                mu = float(_np.mean(_np.abs(llrs)))
+                hard = naive_hard_decode(llrs)
+                crc_ok = check_crc(hard)
+                # Parity unsatisfied count
+                import numpy as _np
+                hb = _np.array([1 if c=='1' else 0 for c in hard], dtype=_np.uint8)
+                unsat = int(_np.sum((LDPC_174_91_H @ hb) % 2))
+                return mu, crc_ok, unsat
+            except Exception:
+                return None
+
+        fused = []
+        for s, dt0, fq0 in promos:
+            r = _fec_probe(dt0, fq0)
+            if r is None:
+                continue
+            mu, crc_ok, unsat = r
+            if crc_ok or (mu >= mu_min and unsat <= unsat_max):
+                fusion = alpha * float(s) + beta * float(mu) - gamma * float(unsat)/83.0
+                fused.append((fusion, dt0, fq0, s, mu, unsat))
+        fused.sort(reverse=True)
+        # Append up to max_promos winners to candidate list (score uses fusion for ordering)
+        added = 0
+        for fusion, dt0, fq0, s0, mu0, unsat0 in fused:
+            candidates.append((float(fusion), float(dt0), float(fq0)))
+            added += 1
+            if added >= max_promos:
+                break
 
     results = []
     # Precompute FFT of the full window once per period for reuse across candidates
