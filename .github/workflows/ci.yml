@@ -72,6 +72,35 @@ jobs:
             echo "avg_runtime=$avg_runtime" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Read short SIC metrics
+        if: always()
+        id: metrics_short_sic
+        run: |
+          set -euo pipefail
+          FILE=".tmp/ft8r_short_sic_metrics.json"
+          if [[ -f "$FILE" ]]; then
+            pass1=$(jq -r '.pass1' "$FILE")
+            pass2=$(jq -r '.pass2' "$FILE")
+            pass3=$(jq -r '.pass3' "$FILE")
+            duration_sec=$(jq -r '.duration_sec' "$FILE")
+            false1=$(jq -r '.false1 // empty' "$FILE")
+            false2=$(jq -r '.false2 // empty' "$FILE")
+            false3=$(jq -r '.false3 // empty' "$FILE")
+            gain_p2=$(jq -r '.uniq_gain_p2 // empty' "$FILE")
+            gain_p3=$(jq -r '.uniq_gain_p3 // empty' "$FILE")
+          else
+            pass1=; pass2=; pass3=; duration_sec=; false1=; false2=; false3=; gain_p2=; gain_p3=
+          fi
+          echo "pass1=$pass1" >> "$GITHUB_OUTPUT"
+          echo "pass2=$pass2" >> "$GITHUB_OUTPUT"
+          echo "pass3=$pass3" >> "$GITHUB_OUTPUT"
+          echo "duration_sec=$duration_sec" >> "$GITHUB_OUTPUT"
+          echo "false1=$false1" >> "$GITHUB_OUTPUT"
+          echo "false2=$false2" >> "$GITHUB_OUTPUT"
+          echo "false3=$false3" >> "$GITHUB_OUTPUT"
+          echo "gain_p2=$gain_p2" >> "$GITHUB_OUTPUT"
+          echo "gain_p3=$gain_p3" >> "$GITHUB_OUTPUT"
+
       - name: Read full regression metrics
         if: always()
         id: metrics_full
@@ -116,6 +145,15 @@ jobs:
           SHORT_DURATION_SEC: ${{ steps.metrics_short.outputs.duration_sec }}
           SHORT_NUM_FILES: ${{ steps.metrics_short.outputs.num_files }}
           SHORT_AVG_RUNTIME: ${{ steps.metrics_short.outputs.avg_runtime }}
+          SIC_PASS1: ${{ steps.metrics_short_sic.outputs.pass1 }}
+          SIC_PASS2: ${{ steps.metrics_short_sic.outputs.pass2 }}
+          SIC_PASS3: ${{ steps.metrics_short_sic.outputs.pass3 }}
+          SIC_FALSE1: ${{ steps.metrics_short_sic.outputs.false1 }}
+          SIC_FALSE2: ${{ steps.metrics_short_sic.outputs.false2 }}
+          SIC_FALSE3: ${{ steps.metrics_short_sic.outputs.false3 }}
+          SIC_GAIN_P2: ${{ steps.metrics_short_sic.outputs.gain_p2 }}
+          SIC_GAIN_P3: ${{ steps.metrics_short_sic.outputs.gain_p3 }}
+          SIC_DURATION_SEC: ${{ steps.metrics_short_sic.outputs.duration_sec }}
           FULL_TOTAL_DECODES: ${{ steps.metrics_full.outputs.total_decodes }}
           FULL_CORRECT_DECODES: ${{ steps.metrics_full.outputs.correct_decodes }}
           FULL_FALSE_DECODES: ${{ steps.metrics_full.outputs.false_decodes }}
@@ -189,9 +227,30 @@ jobs:
               NUM_FILES: process.env.FULL_NUM_FILES,
               AVG_RUNTIME: process.env.FULL_AVG_RUNTIME,
             };
+            function fmtSIC() {
+              const p1 = process.env.SIC_PASS1;
+              const p2 = process.env.SIC_PASS2;
+              const p3 = process.env.SIC_PASS3;
+              const f1 = process.env.SIC_FALSE1;
+              const f2 = process.env.SIC_FALSE2;
+              const f3 = process.env.SIC_FALSE3;
+              const g2 = process.env.SIC_GAIN_P2;
+              const g3 = process.env.SIC_GAIN_P3;
+              const dur = process.env.SIC_DURATION_SEC;
+              if (!p1 || !p2 || !p3) {
+                return `**Short Multipass (SIC)**\n- NOT RUN`;
+              }
+              const s = (x) => `${(parseFloat(x)*100).toFixed(2)}%`;
+              const durS = dur ? `${parseFloat(dur).toFixed(1)}s` : 'N/A';
+              const fstr = (x) => (x ? ` (false: ${s(x)})` : '');
+              const gstr = (g2 && g3) ? `\n- uniq gains: +${g2} / +${g3}` : '';
+              return `**Short Multipass (SIC)**\n- pass1: ${s(p1)}${fstr(f1)}\n- pass2: ${s(p2)}${fstr(f2)}\n- pass3: ${s(p3)}${fstr(f3)}${gstr}\n- runtime: ${durS}`;
+            }
             const body = [
               marker,
               fmtSection('Short Sample WAVs', shortEnv),
+              '',
+              fmtSIC(),
               '',
               fmtSection('Full Sample WAVs', fullEnv),
             ].join('\n');

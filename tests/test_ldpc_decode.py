@@ -25,8 +25,12 @@ def test_ldpc_decode_runs(tmp_path):
     decoded = ldpc_decode(llrs)
     expected = ft8code_bits(msg)
     mismatches = sum(a != b for a, b in zip(naive_bits, expected))
+    # Ensure LDPC is doing non-trivial work: hard decision differs
     assert mismatches > 0
-    assert not check_crc(naive_bits)
+    # At low SNR the hard-decision output can, by chance, still have a valid
+    # CRC (corresponding to some other codeword). Do not assert CRC failure
+    # here to avoid flakiness; we only require LDPC to recover the expected
+    # codeword below.
     assert decoded == expected
     assert check_crc(decoded)
 

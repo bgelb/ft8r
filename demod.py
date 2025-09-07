@@ -19,6 +19,7 @@ from utils import (
 
 from search import find_candidates
 from utils.prof import PROFILER
+from utils.tx import tones_from_bits
 import os
 
 # Symbol positions occupied by the three 7-symbol Costas sequences.
@@ -468,8 +469,8 @@ def _dedup_decodes(records: List[Dict]) -> List[Dict]:
         for g in groups:
             deduped.append(g[0])
 
-    for rec in deduped:
-        rec.pop("llr", None)
+    # Preserve 'llr' for downstream confidence gating (e.g., SIC). Tests do not
+    # rely on its absence, so keep it available.
 
     deduped.sort(key=lambda r: r["score"], reverse=True)
     return deduped
@@ -602,3 +603,163 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
             pass
 
     return _dedup_decodes(results)
+
+
+def _estimate_symbol_phases(
+    samples_in: RealSamples,
+    dt: float,
+    freq: float,
+    bits174: str,
+    *,
+    precomputed_fft: tuple | None = None,
+) -> list[float]:
+    """Return per-symbol phase estimates (radians) for the decoded tones.
+
+    Computes a finely aligned baseband segment for the given ``dt``/``freq``,
+    then, for each symbol, measures the complex correlation against the
+    expected tone and returns the angle as a constant phase offset.
+    """
+    bb, _dt, _freq = fine_sync_candidate(samples_in, freq, dt, precomputed_fft=precomputed_fft)
+    sym_len = _symbol_samples(bb.sample_rate_in_hz)
+    seg = _symbol_matrix(bb.samples, 0, sym_len)
+    bases = _zero_offset_bases(bb.sample_rate_in_hz, sym_len)  # (8, sym_len)
+    tones = tones_from_bits(bits174)
+    phases: list[float] = []
+    for i, t in enumerate(tones):
+        # Complex projection onto tone basis for this symbol
+        z = np.vdot(bases[int(t)], seg[i])  # conj(basis) @ segment
+        phases.append(float(np.angle(z)))
+    return phases
+
+def _estimate_symbol_phase_and_amp(
+    samples_in: RealSamples,
+    dt: float,
+    freq: float,
+    bits174: str,
+    *,
+    precomputed_fft: tuple | None = None,
+) -> tuple[list[float], float]:
+    """Return (per-symbol phases, rough amplitude scale) from matched filters."""
+    bb, _dt, _freq = fine_sync_candidate(samples_in, freq, dt, precomputed_fft=precomputed_fft)
+    sym_len = _symbol_samples(bb.sample_rate_in_hz)
+    seg = _symbol_matrix(bb.samples, 0, sym_len)
+    bases = _zero_offset_bases(bb.sample_rate_in_hz, sym_len)
+    tones = tones_from_bits(bits174)
+    phases: list[float] = []
+    mags: list[float] = []
+    for i, t in enumerate(tones):
+        z = np.vdot(bases[int(t)], seg[i])
+        phases.append(float(np.angle(z)))
+        mags.append(float(np.abs(z)))
+    amp = float(np.median(mags) / max(sym_len, 1))
+    return phases, amp
+
+
+def decode_full_period_multipass(
+    samples_in: RealSamples,
+    threshold: float = 1.0,
+    *,
+    passes: int = 3,
+    sic_scale: float = 0.7,
+    sic_use_phase: bool = True,
+    include_bits: bool = False,
+    return_pass_records: bool = False,
+    return_residuals: bool = False,
+):
+    """Run multi-pass SIC decoding and return all decodes tagged by pass.
+
+    Each pass decodes with :func:`decode_full_period`, synthesizes clean
+    waveforms per successful decode (with per-symbol phase correction), scales
+    by ``sic_scale``, subtracts from the input, and proceeds to the next pass.
+
+    Returns a list of decode dicts with an added key ``pass`` (1-based).
+    """
+    # Work on a residual copy of the original audio
+    residual = np.copy(samples_in.samples)
+    sample_rate = samples_in.sample_rate_in_hz
+    all_records: list[dict] = []
+    per_pass: list[list[dict]] = []
+    residual_snaps: list[RealSamples] = []
+    for p in range(1, max(1, int(passes)) + 1):
+        cur = RealSamples(residual, sample_rate)
+        recs = decode_full_period(cur, threshold=threshold, include_bits=True)
+        # Tag with pass index and optionally strip bits later if requested
+        for r in recs:
+            r["pass"] = p
+        all_records.extend(recs)
+        per_pass.append(recs)
+
+        if p == passes or not recs:
+            # No subtraction snapshot recorded for the final pass or empty pass
+            continue
+        # Prepare FFT once for all phase estimates in this pass
+        pre_fft = _prepare_full_fft(cur)
+        # Subtract synthesized waveforms from residual
+        from utils.tx import generate_ft8_waveform
+        from utils import COSTAS_START_OFFSET_SEC
+        # Confidence gate settings
+        try:
+            min_llr = float(os.getenv("FT8R_SIC_MIN_LLR", "0.5"))
+        except Exception:
+            min_llr = 0.5
+        for r in recs:
+            bits = r.get("bits")
+            if not bits or len(bits) != 174:
+                continue
+            method = str(r.get("method", ""))
+            if not method:
+                continue
+            llr_mu = float(r.get("llr", 0.0))
+            if llr_mu < min_llr:
+                continue
+            dt_f = float(r.get("dt", 0.0))
+            fq_f = float(r.get("freq", 0.0))
+            phases = None
+            amp_est = 1.0
+            if sic_use_phase:
+                try:
+                    phases, amp_est = _estimate_symbol_phase_and_amp(cur, dt_f, fq_f, bits, precomputed_fft=pre_fft)
+                except Exception:
+                    phases, amp_est = None, 1.0
+            # Synthesize unity amplitude and compute LS amplitude on active window
+            synth = generate_ft8_waveform(
+                bits,
+                sample_rate=sample_rate,
+                base_freq_hz=fq_f,
+                start_offset_sec=COSTAS_START_OFFSET_SEC + dt_f,
+                total_duration_sec=15.0,
+                amplitude=1.0,
+                per_symbol_phase=phases,
+            )
+            sym_len_fs = int(round(sample_rate / TONE_SPACING_IN_HZ))
+            active_len = FT8_SYMBOLS_PER_MESSAGE * sym_len_fs
+            start_idx = int(round((COSTAS_START_OFFSET_SEC + dt_f) * sample_rate))
+            end_idx = start_idx + active_len
+            s = synth.samples[start_idx:end_idx]
+            y = residual[start_idx:end_idx]
+            denom = float(np.dot(s, s)) + 1e-12
+            a_ls = float(np.dot(s, y) / denom)
+            a = float(sic_scale) * a_ls
+            if amp_est > 0 and a > 0:
+                a = float(np.sqrt(a * amp_est))
+            a = float(np.clip(a, 0.2, 2.0))
+            synth_arr = synth.samples.astype(residual.dtype, copy=False)
+            n = min(len(residual), len(synth_arr))
+            residual[:n] = residual[:n] - a * synth_arr[:n]
+        if return_residuals:
+            residual_snaps.append(RealSamples(np.copy(residual), sample_rate))
+
+    # Dedupe across passes while keeping the earliest pass occurrence
+    all_records.sort(key=lambda r: (r.get("pass", 1), -float(r.get("score", 0.0))))
+    deduped = _dedup_decodes(all_records)
+    # Optionally drop bits from the returned copy only (avoid mutating per_pass)
+    if not include_bits:
+        deduped_out = []
+        for r in deduped:
+            c = dict(r)
+            c.pop("bits", None)
+            deduped_out.append(c)
+    else:
+        deduped_out = deduped
+    # Always return dict for stability
+    return {"per_pass": per_pass, "all": deduped_out, "residuals": residual_snaps}
