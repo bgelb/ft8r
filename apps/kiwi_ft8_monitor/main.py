@@ -789,7 +789,8 @@ def run_monitor_source(src_factory):
                         peaks_all = []
                         if scores_map is not None and dts_arr is not None and freqs_arr is not None:
                             try:
-                                peaks_all = peak_candidates(scores_map, dts_arr, freqs_arr, threshold=0.0)
+                                from search import budget_tile_candidates, default_candidate_budget
+                                peaks_all = budget_tile_candidates(scores_map, dts_arr, freqs_arr, base_threshold=0.0, budget=default_candidate_budget())
                             except Exception:
                                 peaks_all = []
                         # Attach ft8r diagnostics to each jt9 decode for UI gaps
