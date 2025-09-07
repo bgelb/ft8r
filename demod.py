@@ -577,6 +577,47 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
                     if mu2 > best_mu:
                         best_mu = mu2
                         best_tuple = (bb2, dt2, freq2, llrs2)
+                # Optional dt microsearch: adjust symbol window by small ± offsets
+                if not hard_passed and os.getenv("FT8R_MICRO_DT_ENABLE", "1") not in ("0","","false","False"):
+                    sym_len = _symbol_samples(sr)
+                    # work on current best_tuple as base
+                    bb_b, dt_b, freq_b, llrs_b = best_tuple
+                    base_samples = bb_b.samples
+                    # dt offsets in symbols
+                    dt_sym_offs = np.arange(-1.0, 1.0 + 1e-9, 0.5)
+                    best_dt_mu = float(np.mean(np.abs(llrs_b)))
+                    best_dt_tuple = (bb_b, dt_b, freq_b, llrs_b)
+                    for dto in dt_sym_offs:
+                        if abs(dto) < 1e-12:
+                            continue
+                        # shift window by integer samples
+                        shift = int(round(dto * sym_len))
+                        if shift == 0:
+                            continue
+                        if shift > 0:
+                            seg = np.pad(base_samples, (0, shift))[: base_samples.shape[0]]
+                            seg = seg[shift:]
+                        else:
+                            sh = -shift
+                            seg = np.pad(base_samples, (sh, 0))[0: base_samples.shape[0]]
+                            seg = seg[: base_samples.shape[0]-sh]
+                        if seg.shape[0] != base_samples.shape[0]:
+                            continue
+                        bb_dt = ComplexSamples(seg, sr)
+                        llrs_dt = soft_demod(bb_dt)
+                        mu_dt = float(np.mean(np.abs(llrs_dt)))
+                        hard_dt = naive_hard_decode(llrs_dt)
+                        if check_crc(hard_dt):
+                            decoded_bits = hard_dt
+                            method = "hard"
+                            bb, dt_f, freq_f, llrs = bb_dt, dt_b + dto*FT8_SYMBOL_LENGTH_IN_SEC, freq_b, llrs_dt
+                            hard_passed = True
+                            break
+                        if mu_dt > best_dt_mu:
+                            best_dt_mu = mu_dt
+                            best_dt_tuple = (bb_dt, dt_b + dto*FT8_SYMBOL_LENGTH_IN_SEC, freq_b, llrs_dt)
+                    if not hard_passed and best_dt_mu > best_mu:
+                        best_tuple = best_dt_tuple
                 if not hard_passed:
                     bb_b, dt_b, freq_b, llrs_b = best_tuple
                     with PROFILER.section("ldpc.total"):

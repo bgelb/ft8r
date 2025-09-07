@@ -12,9 +12,8 @@ from utils import (
 from utils.prof import PROFILER
 
 # Default global cap for runtime candidate count (tunable via env).
-# Empirically chosen from candidate distributions across bundled samples
-# (p99≈1244, max≈1260) with headroom.
-DEFAULT_MAX_CANDIDATES = 1500
+# Back-to-basics default tuned via K sweep (short e2e saturates by ~1000).
+DEFAULT_MAX_CANDIDATES = 1000
 
 
 def _costas_active_noise_maps(fft_pwr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -275,30 +274,46 @@ def budget_tile_candidates(
     *,
     budget: int,
 ) -> List[Tuple[float, float, float]]:
-    """Back-to-basics: global Top-K by score with threshold gating.
+    """Select coarse candidates from score grid.
 
-    Ignores per-tile budgeting, NMS, and adaptive quantiles. This serves as a
-    simplified baseline selector to evaluate upper-bound coarse recall without
-    specialized suppression.
+    Modes:
+    - FT8R_COARSE_MODE=topk: global Top-K by score (no threshold)
+    - default: global Top-K among cells >= base_threshold
     """
+    mode = os.getenv("FT8R_COARSE_MODE", "").strip().lower()
     if budget <= 0:
         budget = scores.size
-    mask = scores >= base_threshold
-    idxs = np.nonzero(mask.ravel())[0]
-    if idxs.size == 0:
-        return []
     flat = scores.ravel()
-    if budget < idxs.size:
-        part = idxs[np.argpartition(flat[idxs], -budget)[-budget:]]
-        order = part[np.argsort(flat[part])[::-1]]
+    if mode == "topk":
+        # Pure Top‑K, ignore threshold
+        if budget < flat.size:
+            idx_part = np.argpartition(flat, -budget)[-budget:]
+            idx_sorted = idx_part[np.argsort(flat[idx_part])[::-1]]
+        else:
+            idx_sorted = np.argsort(flat)[::-1]
+        h, w = scores.shape
+        out: List[Tuple[float, float, float]] = []
+        for idx in idx_sorted:
+            i = int(idx // w); j = int(idx % w)
+            out.append((float(scores[i, j]), float(dts[i]), float(freqs[j])))
+        return out
     else:
-        order = idxs[np.argsort(flat[idxs])[::-1]]
-    h, w = scores.shape
-    out: List[Tuple[float, float, float]] = []
-    for idx in order:
-        i = int(idx // w); j = int(idx % w)
-        out.append((float(scores[i, j]), float(dts[i]), float(freqs[j])))
-    return out
+        # Threshold‑gated Top‑K
+        mask = scores >= base_threshold
+        idxs = np.nonzero(mask.ravel())[0]
+        if idxs.size == 0:
+            return []
+        if budget < idxs.size:
+            part = idxs[np.argpartition(flat[idxs], -budget)[-budget:]]
+            order = part[np.argsort(flat[part])[::-1]]
+        else:
+            order = idxs[np.argsort(flat[idxs])[::-1]]
+        h, w = scores.shape
+        out: List[Tuple[float, float, float]] = []
+        for idx in order:
+            i = int(idx // w); j = int(idx % w)
+            out.append((float(scores[i, j]), float(dts[i]), float(freqs[j])))
+        return out
 
 def find_candidates(
     samples_in: RealSamples,
