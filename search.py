@@ -82,7 +82,21 @@ def _costas_active_noise_maps(fft_pwr: np.ndarray) -> tuple[np.ndarray, np.ndarr
 # Number of FFT bins used per symbol bin. This controls the zero-padding
 # applied to each symbol prior to the FFT and therefore the frequency
 # resolution of the search.
-FREQ_SEARCH_OVERSAMPLING_RATIO = 2
+# Helpers to read env
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+# Frequency oversampling ratio (env‑tunable; default 2)
+FREQ_SEARCH_OVERSAMPLING_RATIO = max(1, _env_int("FT8R_FREQ_OSF", 2))
 
 # Number of candidate start offsets evaluated per symbol period.  A value of
 # ``4`` means each subsequent Costas sync position begins one quarter of a
@@ -187,6 +201,18 @@ def candidate_score_map(
             mad_tiles = np.median(dev_blocks, axis=(1, 3))
             mad_map = np.repeat(np.repeat(mad_tiles, tile_dt, axis=0), tile_df, axis=1)
             mad_map = mad_map[:H, :W]
+        # Optional global winsorization to cap extreme outliers in fft power
+        qwins = os.getenv("FT8R_WHITEN_WINSOR_Q", "").strip()
+        if qwins:
+            try:
+                q = float(qwins)
+                if 0.5 < q < 1.0:
+                    with PROFILER.section("search.whiten.winsor"):
+                        cap = float(np.quantile(fft_pad, q))
+                        np.clip(fft_pad, None, cap, out=fft_pad)
+            except Exception:
+                pass
+
         with PROFILER.section("search.whiten.tile.apply"):
             scale = med_map + alpha * mad_map + eps
             fft_pwr = fft_pwr / scale
@@ -367,6 +393,47 @@ def budget_tile_candidates(
                 ptr += 1
             tile["ptr"] = ptr
         q -= q_step
+
+    # Optional band-top1 salvage: ensure at least one pick per ~band_hz if empty
+    if os.getenv("FT8R_COARSE_BAND_TOP1_ENABLE", "0") not in ("0", "", "false", "False"):
+        try:
+            band_hz = float(os.getenv("FT8R_COARSE_BAND_HZ", "100.0"))
+        except Exception:
+            band_hz = 100.0
+        band_bins = max(1, int(round(band_hz / TONE_SPACING_IN_HZ)))
+        # Track bands with any selection
+        taken_cols = np.any(selected_mask, axis=0)
+        W = scores.shape[1]
+        bands = [(j0, min(W, j0 + band_bins)) for j0 in range(0, W, band_bins)]
+        # For each empty band, select the best non-overlapping peak above the thresholds
+        for j0, j1 in bands:
+            if len(results) >= budget:
+                break
+            has_pick = bool(taken_cols[j0:j1].any())
+            if has_pick:
+                continue
+            # Find best candidate in this band
+            block = scores[:, j0:j1]
+            if block.size == 0:
+                continue
+            idx = np.argmax(block)
+            bi = int(idx // (j1 - j0))
+            bj = int(idx % (j1 - j0))
+            i = bi
+            j = j0 + bj
+            s = float(scores[i, j])
+            # Threshold for salvage: keep base floor
+            if s < T_fixed:
+                continue
+            # Check non-overlap footprint
+            if not selected_mask[i, j]:
+                ii0 = max(0, i - nms_dt_half)
+                ii1 = min(h, i + nms_dt_half + 1)
+                jj0 = max(0, j - nms_df_half)
+                jj1 = min(W, j + nms_df_half + 1)
+                if not selected_mask[ii0:ii1, jj0:jj1].any():
+                    selected_mask[i, j] = True
+                    results.append((s, float(dts[i]), float(freqs[j])))
 
     results.sort(reverse=True)
     return results
