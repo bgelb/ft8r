@@ -198,10 +198,8 @@ def candidate_score_map(
 
     num_windows = scores_map.shape[0]
     max_dt_idx = min(max_dt_idx, num_windows - 1)
-    max_base_bin = min(
-        max_freq_bin,
-        (scores_map.shape[1] - 1) // FREQ_SEARCH_OVERSAMPLING_RATIO,
-    )
+    # scores_map is already at base-bin resolution; do not divide by OSF
+    max_base_bin = min(max_freq_bin, scores_map.shape[1] - 1)
 
     idx = np.array(offsets)[:, None] + np.arange(max_dt_idx + 1)
     valid = idx < num_windows
