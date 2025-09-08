@@ -577,6 +577,7 @@ def decode_full_period(samples_in: RealSamples, threshold: float = 1.0, *, inclu
                     if mu2 > best_mu:
                         best_mu = mu2
                         best_tuple = (bb2, dt2, freq2, llrs2)
+                # dt microsearch removed (was degrading e2e); keep best_tuple from df nudge only
                 if not hard_passed:
                     bb_b, dt_b, freq_b, llrs_b = best_tuple
                     with PROFILER.section("ldpc.total"):

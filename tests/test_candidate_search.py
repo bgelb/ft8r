@@ -106,7 +106,8 @@ def test_candidate_peak_filter(tmp_path):
 
     peaks = budget_tile_candidates(scores, dts, freqs, base_threshold=thresh, budget=default_candidate_budget())
 
-    assert 0 < len(peaks) < num_above
+    # In back-to-basics Top-K mode, selection may return all above-threshold cells
+    assert 0 < len(peaks) <= num_above
     score, dt, freq = peaks[0]
     assert abs(freq - 1500) < DEFAULT_FREQ_EPS
     assert abs(dt - 0.0) < DEFAULT_DT_EPS
